@@ -1,0 +1,11 @@
+# Dedicated display-free T3T1 authenticator.
+uses = ["hash_processor", "optiga", "secret", "secure_aes", "tamper"]
+elf_sections = [".vendorheader", ".header", ".flash", ".data"]
+
+[build-options]
+bootloader-devel = { true = ["bootloader_devel"] }
+production = { true = ["production"] }
+# Deliberately reachable from the command line, unlike the emulator-only test
+# features: this is the mode the device is usable in while the microSD gesture is
+# still unwired, so it has to be as easy to build as it is to recognise.
+assumed-presence = { true = ["authenticator_assumed_presence"] }

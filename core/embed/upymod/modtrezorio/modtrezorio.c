@@ -180,6 +180,9 @@ static const mp_rom_map_elem_t mp_module_trezorio_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_POLL_WRITE), MP_ROM_INT(POLL_WRITE)},
 
     {MP_ROM_QSTR(MP_QSTR_USB_EVENT), MP_ROM_INT(SYSHANDLE_USB)},
+#if defined(AUTH_TEST_PRESENCE) && defined(TREZOR_EMULATOR)
+    {MP_ROM_QSTR(MP_QSTR_AUTH_TEST_PRESENCE), mp_const_true},
+#endif
 };
 
 static MP_DEFINE_CONST_DICT(mp_module_trezorio_globals,

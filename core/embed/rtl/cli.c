@@ -13,6 +13,7 @@
 
 #define CLI_CRC_PREFIX "checked-"
 #define CLI_CRC_LENGTH 8
+#define CLI_READ_NO_DATA (-1)
 
 #define CRC32_INITIAL 0xFFFFFFFF
 #define CRC32_POLYNOMIAL 0xEDB88320
@@ -34,9 +35,20 @@ bool cli_init(cli_t* cli, cli_read_cb_t read, cli_write_cb_t write,
   cli->read = read;
   cli->write = write;
   cli->callback_context = callback_context;
+  cli->line_limit = CLI_LINE_BUFFER_SIZE;
   cli->response_crc = CRC32_INITIAL;
 
   return true;
+}
+
+void cli_set_line_limit(cli_t* cli, size_t limit) {
+  cli->line_limit =
+      limit == 0 || limit > CLI_LINE_BUFFER_SIZE ? CLI_LINE_BUFFER_SIZE : limit;
+}
+
+void cli_set_strict_input(cli_t* cli, bool enabled) {
+  cli->strict_input = enabled;
+  cli->invalid_input = false;
 }
 
 void cli_set_commands(cli_t* cli, const cli_command_t* cmd_array,
@@ -328,6 +340,21 @@ static int cli_readch(cli_t* cli) {
     ssize_t len = cli->read(cli->callback_context, &ch, 1);
 
     if (len != 1) {
+      return CLI_READ_NO_DATA;
+    }
+
+    if (ch != '\r' && ch != '\n') {
+      if (cli->raw_line_len < SIZE_MAX) {
+        cli->raw_line_len++;
+      }
+      if (cli->raw_line_len > cli->line_limit) {
+        cli->line_overflow = true;
+      }
+    }
+
+    if (cli->strict_input && ch != '\r' && ch != '\n' &&
+        ((uint8_t)ch < 0x20 || (uint8_t)ch > 0x7E)) {
+      cli->invalid_input = true;
       return 0;
     }
 
@@ -495,7 +522,11 @@ static int cli_process_char(cli_t* cli, int ch) {
       if (cli->interactive) {
         cli_printf(cli, "\r\n");
       }
-      if (cli->line_len < CLI_LINE_BUFFER_SIZE) {
+      if (cli->invalid_input) {
+        return -2;
+      }
+      if (!cli->line_overflow && (size_t)cli->line_len <= cli->line_limit &&
+          cli->line_len < CLI_LINE_BUFFER_SIZE) {
         return 1;
       }
       return -1;
@@ -505,6 +536,10 @@ static int cli_process_char(cli_t* cli, int ch) {
       if (cli->interactive && cli->line_len == cli->line_cursor) {
         char ch;
         while ((ch = cli_autocomplete(cli, buf)) != '\0') {
+          if ((size_t)cli->line_len >= cli->line_limit) {
+            cli->line_overflow = true;
+            break;
+          }
           if (cli->line_len < CLI_LINE_BUFFER_SIZE - 1) {
             cli_printf(cli, "%c", ch);
             buf[cli->line_len++] = ch;
@@ -517,6 +552,11 @@ static int cli_process_char(cli_t* cli, int ch) {
 
     default:
       if (ch >= 0x20 && ch <= 0x7E) {
+        // Never dispatch a command after truncating configured-limit input.
+        if ((size_t)cli->line_len >= cli->line_limit) {
+          cli->line_overflow = true;
+          break;
+        }
         // Printable character
         if (cli->line_len < CLI_LINE_BUFFER_SIZE - 1) {
           // Insert the character at the cursor
@@ -542,6 +582,9 @@ static int cli_process_char(cli_t* cli, int ch) {
 static void cli_clear_line(cli_t* cli) {
   cli->line_len = 0;
   cli->line_cursor = 0;
+  cli->raw_line_len = 0;
+  cli->line_overflow = false;
+  cli->invalid_input = false;
   cli->hist_idx = 0;
   cli->hist_prefix = 0;
   cli->response_crc = CRC32_INITIAL;
@@ -623,14 +666,18 @@ const cli_command_t* cli_process_io(cli_t* cli) {
   int res;
   do {
     int ch = cli_readch(cli);
-    if (ch == 0) {
+    if (ch == CLI_READ_NO_DATA) {
       return NULL;
     }
     res = cli_process_char(cli, ch);
   } while (res == 0);
 
   if (res < 0) {
-    cli_error(cli, CLI_ERROR_FATAL, "Input line too long.");
+    if (cli->invalid_input) {
+      cli_error(cli, CLI_ERROR_FATAL, "Invalid input.");
+    } else {
+      cli_error(cli, CLI_ERROR_FATAL, "Input line too long.");
+    }
     goto cleanup;
   }
 

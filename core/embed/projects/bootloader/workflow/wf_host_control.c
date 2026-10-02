@@ -29,11 +29,20 @@
 #include "wire/wire_iface_usb.h"
 #include "workflow.h"
 
+#if defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION
+#include "headless_boot_policy.h"
+#endif
+
 #ifdef USE_BLE
 #include <wire/wire_iface_ble.h>
 #endif
 
-static workflow_result_t bootloader_process_comm(wire_iface_t *wire_iface) {
+static workflow_result_t bootloader_process_comm(wire_iface_t *wire_iface,
+                                                 bool *recognized) {
+  if (recognized != NULL) {
+    *recognized = false;
+  }
+
   if (wire_iface == NULL) {
     // continue with the event processing
     return WF_OK;
@@ -50,51 +59,57 @@ static workflow_result_t bootloader_process_comm(wire_iface_t *wire_iface) {
   fw_check_info_t fw;
   memset(&fw, 0, sizeof(fw));
 
+  bool request_decoded = false;
+  workflow_result_t result = WF_OK;
+
   switch (msg_id) {
     case MessageType_MessageType_Initialize:
       fw_check(&fw);
-      workflow_initialize(&active_iface, &fw);
-      // continue with the event processing
-      return WF_OK;
+      result = workflow_initialize(&active_iface, &fw, &request_decoded);
       break;
     case MessageType_MessageType_Ping:
-      workflow_ping(&active_iface);
-      // continue with the event processing
-      return WF_OK;
+      result = workflow_ping(&active_iface, &request_decoded);
       break;
     case MessageType_MessageType_GetFeatures:
       fw_check(&fw);
-      workflow_get_features(&active_iface, &fw);
-      // continue with the event processing
-      return WF_OK;
+      result = workflow_get_features(&active_iface, &fw, &request_decoded);
       break;
     case MessageType_MessageType_WipeDevice:
-      return workflow_wipe_device(&active_iface);
+      result = workflow_wipe_device(&active_iface, &request_decoded);
       break;
     case MessageType_MessageType_FirmwareErase:
-      return workflow_firmware_update(&active_iface);
+      result = workflow_firmware_update(&active_iface, &request_decoded);
       break;
 #if defined LOCKABLE_BOOTLOADER
     case MessageType_MessageType_UnlockBootloader:
-      return workflow_unlock_bootloader(&active_iface);
+      result = workflow_unlock_bootloader(&active_iface, &request_decoded);
       break;
 #endif
     default:
       recv_msg_unknown(&active_iface);
-      // continue with the event processing
       return WF_OK;
   }
+
+  if (recognized != NULL) {
+#if defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION
+    *recognized = request_decoded && headless_is_recognized_message(msg_id);
+#else
+    *recognized = request_decoded;
+#endif
+  }
+
+  return result;
 }
 
-workflow_result_t bootloader_process_usb(void) {
+workflow_result_t bootloader_process_usb(bool *recognized) {
   wire_iface_t *iface = usb_iface_get();
-  return bootloader_process_comm(iface);
+  return bootloader_process_comm(iface, recognized);
 }
 
 #ifdef USE_BLE
 workflow_result_t bootloader_process_ble(void) {
   wire_iface_t *iface = ble_iface_get();
-  return bootloader_process_comm(iface);
+  return bootloader_process_comm(iface, NULL);
 }
 #endif
 

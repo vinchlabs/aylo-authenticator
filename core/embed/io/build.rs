@@ -2,6 +2,8 @@ use xbuild::{Result, build_mods};
 
 #[path = "app_arena/build.rs"]
 mod app_arena;
+#[path = "auth_presence/build.rs"]
+mod auth_presence;
 #[path = "backlight/build.rs"]
 mod backlight;
 #[path = "ble/build.rs"]
@@ -41,17 +43,21 @@ mod usb;
 
 fn main() -> Result<()> {
     xbuild::build(|lib| {
+        if cfg!(feature = "authenticator") {
+            lib.add_define("AUTHENTICATOR", Some("1"));
+        }
         lib.import_lib("sec")?;
 
         build_mods!(
             lib,
             [
                 app_arena if cfg!(feature = "app_loading"),
+                auth_presence if cfg!(feature = "auth_presence"),
                 backlight if cfg!(feature = "backlight"),
                 ble if cfg!(feature = "ble"),
                 button if cfg!(feature = "button"),
-                display,
-                gfx,
+                display if cfg!(feature = "display"),
+                gfx if cfg!(feature = "display"),
                 haptic if cfg!(feature = "haptic"),
                 notify,
                 nfc if cfg!(feature = "nfc"),
@@ -62,7 +68,12 @@ fn main() -> Result<()> {
                 sdcard if cfg!(feature = "sd_card"),
                 suspend if cfg!(feature = "suspend"),
                 touch if cfg!(feature = "touch"),
-                translations,
+                // Excluded from the authenticator: translations_write() and
+                // translations_erase() operate on ASSETS_AREA, which on this
+                // project holds the third vault replica. A headless
+                // authenticator has no strings to localise, so the whole
+                // subsystem is left out rather than merely unused.
+                translations if cfg!(not(feature = "authenticator")),
                 tsqueue,
                 usb if cfg!(feature = "usb"),
             ]

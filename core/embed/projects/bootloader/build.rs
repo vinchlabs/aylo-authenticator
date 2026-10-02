@@ -21,6 +21,28 @@ fn main() -> Result<()> {
             ("PB_NO_ERRMSG", Some("1")),
         ]);
 
+        // Bare-board build: no display or touch is fitted, so the UI workflows must
+        // be skipped. Never enable this path in a production build.
+        //
+        // This used to also require bootloader_devel, which was wrong in a way that
+        // mattered. bootloader_devel is precisely what makes image.c substitute the
+        // published development keys for MODEL_BOOTLOADER_KEYS and
+        // MODEL_BOARDLOADER_KEYS, so demanding it made "headless" and "signed with
+        // keys anyone has" inseparable -- the clause enforced the very weakness it
+        // read as guarding against, and blocked activation step 2, whose whole point
+        // is a headless bootloader carrying this project's own keys. The clause that
+        // actually keeps this path out of a shipped build is !production, and it stays.
+        if cfg!(feature = "headless_dev") {
+            assert!(
+                !cfg!(feature = "production"),
+                "headless_dev forbids production: there is no display to show a \
+                 confirmation on, so the UI workflows are compiled out"
+            );
+            lib.add_define("TS5_HEADLESS_DEV", Some("1"));
+            lib.add_source("headless_boot_policy.c");
+            lib.add_source("authenticator_update_policy.c");
+        }
+
         lib.add_sources([
             "bootui.c",
             "fw_check.c",

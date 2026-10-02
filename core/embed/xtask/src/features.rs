@@ -3,6 +3,7 @@ use std::{env, io, process};
 
 use anyhow::{Result, bail};
 
+use crate::args::{Model, Project};
 use crate::options::ResolvedBuildArgs;
 use crate::{config, helpers};
 
@@ -34,7 +35,32 @@ pub fn resolve_features(args: &ResolvedBuildArgs) -> Result<ResolvedBuildFeature
         }
     }
 
+    if args.headless_dev {
+        if args.project != Project::Bootloader {
+            bail!("headless_dev is supported only for the bootloader project");
+        }
+        if args.model != Model::T3T1 || args.emulator {
+            bail!("headless_dev is supported only for T3T1 hardware builds");
+        }
+        // --bootloader-devel is no longer required, and requiring it was a mistake:
+        // that flag substitutes the published development keys for the model's
+        // MODEL_BOOTLOADER_KEYS and MODEL_BOARDLOADER_KEYS, so insisting on it meant a
+        // headless build could only ever be signed by keys whose private halves are
+        // public. Activation step 2 needs the opposite -- headless, carrying this
+        // project's own keys -- so only the production clause remains, because there is
+        // no display on this board to show anything a production build would confirm.
+        if args.production {
+            bail!("headless_dev forbids --production: the UI workflows are compiled out");
+        }
+    }
+
     let mut features: Vec<String> = vec![args.model.feature_name()];
+
+    if args.authenticator_kernel {
+        if args.project != Project::Kernel || args.model != Model::T3T1 || args.emulator {
+            bail!("authenticator kernel is only supported for T3T1 hardware");
+        }
+    }
 
     if args.emulator {
         features.push("emulator".into());
@@ -70,6 +96,20 @@ pub fn resolve_features(args: &ResolvedBuildArgs) -> Result<ResolvedBuildFeature
         board_features.retain(|f| f != "tropic");
     }
     features.extend(board_features);
+
+    if args.authenticator_kernel {
+        features = vec![
+            args.model.feature_name(),
+            "mcu_stm32u58".into(),
+            "authenticator".into(),
+        ];
+        if args.bootloader_devel {
+            features.push("bootloader_devel".into());
+        }
+        if args.production {
+            features.push("production".into());
+        }
+    }
 
     let target_triple = if args.emulator {
         None
@@ -117,6 +157,9 @@ pub fn configure_cargo(args: &ResolvedBuildArgs, cmd: &mut process::Command) -> 
     let mut rebuild_std = false;
 
     cmd.args(["--package", args.project.package_name()]);
+    if args.authenticator_kernel {
+        cmd.arg("--no-default-features");
+    }
     cmd.args(["--features", &resolved.features.join(",")]);
     cmd.args(["--profile", args.cargo_profile_name()]);
     cmd.env("TREZOR_BOARD_HEADER", &resolved.board_header);
@@ -196,6 +239,43 @@ mod tests {
     use crate::args::Project;
 
     #[test]
+    fn authenticator_kernel_excludes_display_and_wire() {
+        let args = ResolvedBuildArgs {
+            project: Project::Kernel,
+            model: Model::T3T1,
+            authenticator_kernel: true,
+            ..ResolvedBuildArgs::default()
+        };
+        let resolved = resolve_features(&args).unwrap();
+        assert!(resolved.features.contains(&"authenticator".to_string()));
+        assert!(!resolved.features.iter().any(|feature| matches!(
+            feature.as_str(),
+            "display" | "touch" | "dma2d" | "framebuffer" | "universal_fw"
+        )));
+        let mut command = process::Command::new("cargo");
+        configure_cargo(&args, &mut command).unwrap();
+        assert!(command.get_args().any(|arg| arg == "--no-default-features"));
+    }
+
+    #[test]
+    fn authenticator_kernel_closes_the_applet_window_onto_the_vault_areas() {
+        // The assets area is replica 2 on this project, and the MPU's application
+        // mode maps it read-only-unprivileged on every other model so that a UI
+        // applet can dereference the pointer translations_read() returns. mpu.c is
+        // compiled into the `sys` library, which never sees the AUTHENTICATOR
+        // define the kernel adds to its own sources, so the exclusion has to
+        // travel as a cargo feature or it silently does nothing at all.
+        let args = ResolvedBuildArgs {
+            project: Project::Kernel,
+            model: Model::T3T1,
+            authenticator_kernel: true,
+            ..ResolvedBuildArgs::default()
+        };
+        let resolved = resolve_features(&args).unwrap();
+        assert!(resolved.features.contains(&"authenticator".to_string()));
+    }
+
+    #[test]
     fn rejects_insecure_storage_in_production_builds() {
         let args = ResolvedBuildArgs {
             production: true,
@@ -229,6 +309,62 @@ mod tests {
 
         let error = resolve_features(&args).unwrap_err();
         assert!(error.to_string().contains("production"));
+    }
+
+    #[test]
+    fn accepts_explicit_t3t1_headless_development_bootloader() {
+        let args = ResolvedBuildArgs {
+            project: Project::Bootloader,
+            model: Model::T3T1,
+            bootloader_devel: true,
+            headless_dev: true,
+            ..ResolvedBuildArgs::default()
+        };
+
+        let features = resolve_features(&args).unwrap().features;
+        assert!(features.contains(&"headless_dev".to_string()));
+    }
+
+    #[test]
+    fn rejects_headless_dev_without_development_bootloader() {
+        let args = ResolvedBuildArgs {
+            project: Project::Bootloader,
+            model: Model::T3T1,
+            headless_dev: true,
+            ..ResolvedBuildArgs::default()
+        };
+
+        assert!(resolve_features(&args).is_err());
+    }
+
+    #[test]
+    fn rejects_headless_dev_for_production_or_other_targets() {
+        for args in [
+            ResolvedBuildArgs {
+                project: Project::Bootloader,
+                model: Model::T3T1,
+                bootloader_devel: true,
+                headless_dev: true,
+                production: true,
+                ..ResolvedBuildArgs::default()
+            },
+            ResolvedBuildArgs {
+                project: Project::Bootloader,
+                model: Model::T3W1,
+                bootloader_devel: true,
+                headless_dev: true,
+                ..ResolvedBuildArgs::default()
+            },
+            ResolvedBuildArgs {
+                project: Project::Firmware,
+                model: Model::T3T1,
+                bootloader_devel: true,
+                headless_dev: true,
+                ..ResolvedBuildArgs::default()
+            },
+        ] {
+            assert!(resolve_features(&args).is_err());
+        }
     }
 
     #[test]

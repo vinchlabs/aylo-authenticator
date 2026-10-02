@@ -45,6 +45,10 @@ impl OutputType {
     }
 }
 
+fn compiler_dependency_path(output: &Path, output_type: OutputType) -> PathBuf {
+    output.with_extension(format!("{}.d", output_type.extension()))
+}
+
 // Represents the result of compiling a single source file
 struct CompileArtifact {
     // Index of the compile unit, used to maintain the original order of units
@@ -164,7 +168,10 @@ impl CLibrary {
                 .extension()
                 .is_some_and(|ext| ext == "c" || ext == "cpp" || ext == "cc")
             {
-                Some(output.with_extension("d"))
+                // Object and preprocessed outputs share a source stem. Keep their
+                // compiler dependency files distinct, or a NO_QSTR preprocessing
+                // pass can overwrite the object's generated-header dependencies.
+                Some(compiler_dependency_path(&output, output_type))
             } else {
                 None
             };
@@ -308,4 +315,23 @@ fn make_static_library(objects: Vec<PathBuf>, lib_name: &str) -> Result<()> {
     cargo_out::rustc_link_search(format!("native={}", out_dir.display()));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OutputType, compiler_dependency_path};
+    use std::path::Path;
+
+    #[test]
+    fn object_and_qstr_preprocessing_keep_separate_header_dependencies() {
+        let source = Path::new("out/qstr");
+        assert_eq!(
+            compiler_dependency_path(source, OutputType::Object),
+            Path::new("out/qstr.o.d")
+        );
+        assert_eq!(
+            compiler_dependency_path(source, OutputType::Preprocessed("upydef")),
+            Path::new("out/qstr.upydef.d")
+        );
+    }
 }

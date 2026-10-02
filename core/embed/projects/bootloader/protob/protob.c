@@ -151,6 +151,13 @@ secbool recv_msg_firmware_erase(protob_io_t *iface, FirmwareErase *msg) {
   return result;
 }
 
+secbool recv_msg_unlock_bootloader(protob_io_t *iface, UnlockBootloader *msg) {
+  MSG_RECV_INIT(UnlockBootloader);
+  secbool result = MSG_RECV(UnlockBootloader);
+  memcpy(msg, &msg_recv, sizeof(UnlockBootloader));
+  return result;
+}
+
 secbool send_msg_request_firmware(protob_io_t *iface, uint32_t offset,
                                   uint32_t length) {
   MSG_SEND_INIT(FirmwareRequest);

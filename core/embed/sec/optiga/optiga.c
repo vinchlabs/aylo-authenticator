@@ -855,6 +855,7 @@ bool optiga_pin_set(
   }
 
 end:
+  memzero(hmac_stretching_secret, sizeof(hmac_stretching_secret));
   memzero(pin_secret, sizeof(pin_secret));
   memzero(digest, sizeof(digest));
   optiga_clear_all_auto_states();

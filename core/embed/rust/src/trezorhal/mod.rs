@@ -1,7 +1,9 @@
 pub mod bip39;
+#[cfg(not(feature = "authenticator"))]
 pub mod bitblt;
 #[cfg(feature = "ble")]
 pub mod ble;
+#[cfg(not(feature = "authenticator"))]
 pub mod display;
 mod ffi;
 #[cfg(feature = "haptic")]
@@ -30,6 +32,7 @@ pub mod wordlist;
 
 pub mod secbool;
 
+#[cfg(not(feature = "authenticator"))]
 pub mod sysevent;
 
 #[cfg(feature = "power_manager")]

@@ -33,6 +33,7 @@
 #endif
 
 #include "usb_internal.h"
+#include "usb_authenticator_desc.h"
 
 #define USB_MAX_CONFIG_DESC_SIZE 256
 #define USB_MAX_STR_DESC_SIZE (USB_MAX_STR_SIZE * 2 + 2)
@@ -145,6 +146,11 @@ secbool usb_init(const usb_dev_info_t *dev_info) {
   drv->dev_desc.iSerialNumber = USBD_IDX_SERIAL_STR;
   drv->dev_desc.bNumConfigurations = 1;
 
+#ifdef AUTHENTICATOR
+  memcpy(&drv->dev_desc, &g_authenticator_usb_descriptors.device,
+         sizeof(drv->dev_desc));
+#endif
+
   // String table
   strncpy(drv->str_table.manufacturer, dev_info->manufacturer,
           USB_MAX_STR_SIZE);
@@ -168,6 +174,14 @@ secbool usb_init(const usb_dev_info_t *dev_info) {
   drv->config_desc->bmAttributes = 0x80;
   // Maximum Power Consumption in 2mA units
   drv->config_desc->bMaxPower = 0x32;
+
+#ifdef AUTHENTICATOR
+  memcpy(drv->config_desc, &g_authenticator_usb_descriptors.config,
+         sizeof(*drv->config_desc));
+  // Class registration fills these two fields before USB starts.
+  drv->config_desc->wTotalLength = sizeof(*drv->config_desc);
+  drv->config_desc->bNumInterfaces = 0;
+#endif
 
   // starting with this flag set, to avoid false warnings
   drv->initialized = sectrue;
@@ -418,6 +432,20 @@ void *usb_alloc_class_descriptors(size_t desc_len) {
     return NULL;  // Not enough space in the descriptor
   }
 }
+
+#ifdef AUTHENTICATOR
+bool usb_authenticator_descriptors_match(void) {
+  const usb_driver_t *drv = &g_usb_driver;
+  const authenticator_usb_descriptors_t *canonical =
+      &g_authenticator_usb_descriptors;
+  const size_t config_size = sizeof(canonical->config) + sizeof(canonical->hid);
+  return drv->initialized == sectrue &&
+         memcmp(&drv->dev_desc, &canonical->device,
+                sizeof(canonical->device)) == 0 &&
+         drv->config_desc->wTotalLength == config_size &&
+         memcmp(drv->desc_buffer, &canonical->config, config_size) == 0;
+}
+#endif
 
 // ==========================================================================
 // USB configuration (device & string descriptors)

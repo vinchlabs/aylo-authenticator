@@ -157,6 +157,7 @@ nem = ["crypto/nem", "upymod/nem"]
 # --------------------------------------------------------------------------
 
 default = [
+    "upymod/default",
     "io/display",
     "io/fancy_fatal_error",
     "io/usb_iface_wire",

@@ -25,6 +25,7 @@ trezor_lib.workspace = true
 
 asan = ["models/asan"]
 bootloader_devel = ["sec/bootloader_devel"]
+headless_dev = []
 clippy = ["trezor_lib/clippy"]
 dbg_console_swo = ["dbg_console", "sys/dbg_console_swo"]
 dbg_console_system_view = ["dbg_console", "sys/dbg_console_system_view"]

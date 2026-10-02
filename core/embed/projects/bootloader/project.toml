@@ -49,6 +49,7 @@ elf_sections = [".header", ".flash", ".data"]
 [build-options]
 asan              = { true = ["asan"] }
 bootloader-devel  = { true = ["bootloader_devel"] }
+headless-dev       = { true = ["headless_dev"] }
 dbg-console       = { vcp = ["dbg_console_vcp"], swo = ["dbg_console_swo"], system-view = ["dbg_console_system_view"] }
 debug-link        = { true = ["debuglink", "ui_debug"] }
 disable-animation = { true = ["disable_animation"] }

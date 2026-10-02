@@ -11,19 +11,57 @@ use xbuild::{
 };
 
 fn main() -> Result<()> {
+    if cfg!(feature = "authenticator_test_backend")
+        && !(cfg!(feature = "authenticator") && cfg!(feature = "emulator"))
+    {
+        bail!("authenticator test backend requires the authenticator emulator");
+    }
+    if cfg!(feature = "authenticator_test_presence")
+        && !(cfg!(feature = "authenticator") && cfg!(feature = "emulator"))
+    {
+        bail!("authenticator test presence requires the authenticator emulator");
+    }
+    // Hardware is the whole point of this one, so it is not emulator-only. It is
+    // still meaningless anywhere but the authenticator.
+    if cfg!(feature = "authenticator_assumed_presence") && !cfg!(feature = "authenticator") {
+        bail!("assumed presence belongs to the authenticator");
+    }
     xbuild::build(|lib| {
         let mpy_dir = "../../vendor/micropython";
 
         lib.import_lib("io")?;
 
+        if cfg!(feature = "authenticator") {
+            lib.add_define("AUTHENTICATOR", Some("1"));
+            lib.add_source("modtrezorauth/modtrezorauth.c");
+        }
+        if cfg!(feature = "authenticator_test_presence") {
+            lib.add_define("AUTH_TEST_PRESENCE", Some("1"));
+        }
+        if cfg!(feature = "authenticator_assumed_presence") {
+            lib.add_define("AUTH_ASSUMED_PRESENCE", Some("1"));
+        }
+
         if cfg!(feature = "emulator") {
             // There are two mpconfigport.h files in both ports/unix and projects/unix.
             // The first one has precedence and is used for compilation. We need mphalport.h
             // from the other.
-            lib.add_include("../projects/firmware/src/unix");
+            lib.add_include(if cfg!(feature = "authenticator") {
+                "../projects/authenticator/src/unix"
+            } else {
+                "../projects/firmware/src/unix"
+            });
             lib.add_include(PathBuf::from(mpy_dir).join("ports/unix"));
         } else if cfg!(feature = "mcu_stm32") {
-            lib.add_include("../projects/firmware/src/stm32");
+            lib.add_include(if cfg!(feature = "authenticator") {
+                "../projects/authenticator/src/stm32"
+            } else {
+                "../projects/firmware/src/stm32"
+            });
+            if cfg!(feature = "authenticator") {
+                // Reuse only the low-level MicroPython HAL, not its firmware port config.
+                lib.add_include("../projects/firmware/src/stm32");
+            }
         } else {
             bail_unsupported!();
         }
@@ -36,7 +74,9 @@ fn main() -> Result<()> {
             lib.add_define("BITCOIN_ONLY", Some("1"));
         }
 
-        if cfg!(feature = "layout_bolt") {
+        if cfg!(feature = "authenticator") {
+            // No UI layout is compiled into the dedicated authenticator.
+        } else if cfg!(feature = "layout_bolt") {
             lib.add_define("UI_LAYOUT_BOLT", None);
         } else if cfg!(feature = "layout_caesar") {
             lib.add_define("UI_LAYOUT_CAESAR", None);
@@ -113,13 +153,25 @@ fn main() -> Result<()> {
             "modutime.c",
             "rustmods.c",
             "trezorobj.c",
-            "modtrezorconfig/modtrezorconfig.c",
             "modtrezorcrypto/modtrezorcrypto.c",
             "modtrezorcrypto/crc.c",
             "modtrezorio/modtrezorio.c",
-            "modtrezorui/modtrezorui.c",
-            "modtrezorutils/modtrezorutils.c",
         ]);
+
+        if !cfg!(feature = "authenticator") {
+            lib.add_sources([
+                // trezorconfig is the unprivileged door to ordinary storage:
+                // config.wipe() reaches storage_wipe(), which erases
+                // STORAGE_AREAS[0] and STORAGE_AREAS[1]. On the authenticator
+                // those two areas are vault replicas 0 and 1, so the module is
+                // not compiled at all rather than left importable-but-unused.
+                // The authenticator's own persistence is storage/authenticator.py
+                // over the trezorauth native module.
+                "modtrezorconfig/modtrezorconfig.c",
+                "modtrezorui/modtrezorui.c",
+                "modtrezorutils/modtrezorutils.c",
+            ]);
+        }
 
         if cfg!(feature = "app_loading") {
             lib.add_sources(["modtrezorapp/modtrezorapp.c"]);
@@ -436,7 +488,15 @@ impl<'a> MpyBuilder<'a> {
         // Additional sourcess that do not live in the /upymod folder.
         // TODO: remove this hack by moving these sources (or part of them)
         // into upymod.
-        let extra_sources = if cfg!(feature = "emulator") {
+        let extra_sources = if cfg!(feature = "authenticator") && cfg!(feature = "emulator") {
+            [self
+                .crate_dir
+                .join("../projects/authenticator/src/unix/main.c")]
+        } else if cfg!(feature = "authenticator") {
+            [self
+                .crate_dir
+                .join("../projects/authenticator/src/stm32/main.c")]
+        } else if cfg!(feature = "emulator") {
             [self.crate_dir.join("../projects/firmware/src/unix/main.c")]
         } else if cfg!(feature = "mcu_stm32") {
             [self.crate_dir.join("../projects/firmware/src/stm32/main.c")]
@@ -544,6 +604,11 @@ impl<'a> MpyBuilder<'a> {
     fn build_protobuf_headers(&self) -> Result<PathBuf> {
         let protob_dir = self.crate_dir.join("../../../common/protob");
         let output = self.genhdr_dir.join("qstrdefs.protobuf.h");
+        if cfg!(feature = "authenticator") {
+            // No protobuf/Wire/debuglink names may enter the frozen qstr table.
+            fs::write(&output, b"")?;
+            return Ok(output);
+        }
         let inputs = self.collect_protobuf_inputs(&protob_dir)?;
         let pb2py_path = protob_dir.join("pb2py");
 
@@ -569,6 +634,9 @@ impl<'a> MpyBuilder<'a> {
     }
 
     fn build_protobuf_blobs(&self, qstrdefs_generated: &Path) -> Result<()> {
+        if cfg!(feature = "authenticator") {
+            return Ok(());
+        }
         let protob_dir = self.crate_dir.join("../../../common/protob");
 
         let inputs = self.collect_protobuf_inputs(&protob_dir)?;
@@ -927,7 +995,10 @@ impl<'a> MpyBuilder<'a> {
         };
 
         // Make short name that appears in mpy-cross output
-        let source_name = source.strip_prefix(py_src_dir).unwrap_or(source);
+        let source_name = source
+            .strip_prefix(py_src_dir.join("authenticator_frozen"))
+            .or_else(|_| source.strip_prefix(py_src_dir))
+            .unwrap_or(source);
 
         // Compile .i file to .mpy using mpy-cross.
         let mpy_file = i_file.with_extension("mpy").to_path_buf();
@@ -1033,6 +1104,23 @@ impl<'a> MpyBuilder<'a> {
         let mut files = InputFiles::new();
 
         let src = &self.py_src_dir;
+        if cfg!(feature = "authenticator") {
+            for path in [
+                "authenticator_boot.py",
+                "authenticator_session.py",
+                "apps/__init__.py",
+            ] {
+                files.add(src, path)?;
+            }
+            files.add(src.join("apps/authenticator"), "*.py")?;
+            if !cfg!(feature = "authenticator_test_presence") {
+                files.remove(src.join("apps/authenticator"), "test_presence.py");
+            }
+            files.add(src.join("authenticator_frozen"), "trezor/*.py")?;
+            files.add(src.join("authenticator_frozen"), "storage/*.py")?;
+            files.add(src, "storage/authenticator.py")?;
+            return Ok(files);
+        }
         let current_model = &self.current_model;
 
         files.add(src, "*.py")?;

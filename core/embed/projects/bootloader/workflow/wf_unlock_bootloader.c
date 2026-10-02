@@ -32,7 +32,20 @@
 #include "rust_ui_bootloader.h"
 #include "workflow.h"
 
-workflow_result_t workflow_unlock_bootloader(protob_io_t *iface) {
+workflow_result_t workflow_unlock_bootloader(protob_io_t *iface,
+                                             bool *request_decoded) {
+  if (request_decoded != NULL) {
+    *request_decoded = false;
+  }
+
+  UnlockBootloader msg_recv;
+  if (sectrue != recv_msg_unlock_bootloader(iface, &msg_recv)) {
+    return WF_ERROR;
+  }
+  if (request_decoded != NULL) {
+    *request_decoded = true;
+  }
+
   confirm_result_t response = ui_screen_unlock_bootloader_confirm();
   if (CONFIRM != response) {
     send_user_abort(iface, "Bootloader unlock cancelled");

@@ -98,6 +98,7 @@ macro_rules! build_options {
             pub project: Project,
             pub model: Model,
             pub emulator: bool,
+            pub authenticator_kernel: bool,
             $(pub $name: <$ty as ResolveValue>::Resolved,)+
         }
 
@@ -111,6 +112,7 @@ macro_rules! build_options {
                     project: args.project,
                     model: args.model,
                     emulator: args.emulator,
+                    authenticator_kernel: false,
                     $($name: <$ty as ResolveValue>::resolve(o.$name),)+
                 })
             }
@@ -174,6 +176,15 @@ build_options! {
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     map bootloader_devel: bool,
 
+    /// Confirm authenticator operations without asking anybody. For a board
+    /// whose only gesture is not wired up yet; refused in production.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    map assumed_presence: bool,
+
+    /// Build the display-free timed T3T1 development bootloader
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    map headless_dev: bool,
+
     /// Enable unsafe firmware features
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     map unsafe_fw: bool,
@@ -232,7 +243,6 @@ build_options! {
     /// is not reading them).
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     map block_on_vcp: bool,
-
     /// Enable Address Sanitizer (ASAN) instrumentation
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     map asan: bool,

@@ -98,6 +98,7 @@ fn build_impl(args: ResolvedBuildArgs, is_dependency: bool) -> Result<()> {
             build_impl(
                 ResolvedBuildArgs {
                     project: dependency,
+                    authenticator_kernel: args.project == Project::Authenticator,
                     ..args.clone()
                 },
                 true,

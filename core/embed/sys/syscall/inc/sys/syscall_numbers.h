@@ -244,4 +244,34 @@ typedef enum {
   SYSCALL_STORAGE_SET_COUNTER,
   SYSCALL_STORAGE_NEXT_COUNTER,
 
+  SYSCALL_AUTH_STATUS,
+  SYSCALL_AUTH_PROVISION,
+  SYSCALL_AUTH_CHANGE_PIN,
+  SYSCALL_AUTH_KEY_AGREEMENT,
+  SYSCALL_AUTH_ISSUE_TOKEN,
+  SYSCALL_AUTH_CHECK_AUTH,
+  SYSCALL_AUTH_CLEAR_SESSION,
+  SYSCALL_AUTH_DISCONNECT,
+  SYSCALL_AUTH_WIPE,
+  SYSCALL_AUTH_CREDENTIAL_CREATE,
+  SYSCALL_AUTH_CREDENTIAL_OPEN,
+  SYSCALL_AUTH_CREDENTIAL_SIGN,
+  SYSCALL_AUTH_CREDENTIAL_HMAC,
+  SYSCALL_AUTH_RESIDENT_GET,
+  SYSCALL_AUTH_RESIDENT_SET,
+  SYSCALL_AUTH_RESIDENT_DELETE,
+  // Appended rather than grouped with the other PIN calls on purpose: these are
+  // ordinals shared by a kernel and an application that are built separately,
+  // so
+  // inserting one renumbers every call after it.
+  SYSCALL_AUTH_SET_PIN,
+  // Appended for the same reason, and the only presence call that crosses
+  // the boundary: the application may ask for a reading of the confirmation
+  // line and may not configure or release it.
+  SYSCALL_AUTH_PRESENCE_SAMPLE,
+  // Appended for the same reason as the two above. Reports which resident slots
+  // hold a credential, in one authenticated pass over the snapshot, so an
+  // enumerating command no longer pays a hundred of them.
+  SYSCALL_AUTH_RESIDENT_SCAN,
+
 } syscall_number_t;

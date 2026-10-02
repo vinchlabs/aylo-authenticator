@@ -71,6 +71,8 @@ trustzone = ["sys/trustzone"]
 # --------------------------------------------------------------------------
 
 test = [
+    "authenticator",
+    "authenticator_test_backend",
     "mcu_stm32u5g",
     "models/model_t3w1",
     "emulator",
@@ -86,3 +88,6 @@ test = [
 mcu_stm32u5 = ["mcu_stm32"]
 mcu_stm32f4 = ["mcu_stm32"]
 mcu_stm32 = []
+
+authenticator = []
+authenticator_test_backend = []

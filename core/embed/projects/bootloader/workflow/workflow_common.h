@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 typedef enum {
   WF_ERROR_FATAL = 0,
   WF_ERROR = 0x11223344,
@@ -33,6 +35,6 @@ typedef enum {
   WF_CANCELLED = 0x55667788,
 } workflow_result_t;
 
-workflow_result_t bootloader_process_usb(void);
+workflow_result_t bootloader_process_usb(bool *recognized);
 
 workflow_result_t bootloader_process_ble(void);

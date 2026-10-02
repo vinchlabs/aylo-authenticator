@@ -22,10 +22,17 @@
 
 #include <trezor_rtl.h>
 
+#ifndef AUTHENTICATOR
 #include <io/display.h>
 #include <io/dma2d_bitblt.h>
-#include <io/notify.h>
+// Left out of the authenticator along with the rest of the UI: the translations
+// area is ASSETS_AREA, which on this project holds the third vault replica.
 #include <io/translations.h>
+#endif
+#ifdef USE_AUTH_PRESENCE
+#include <io/auth_presence.h>
+#endif
+#include <io/notify.h>
 #include <io/usb.h>
 #include <sec/boot_image.h>
 #include <sec/fwutils.h>
@@ -97,6 +104,10 @@
 #include "syscall_context.h"
 #include "syscall_internal.h"
 #include "syscall_verifiers.h"
+#ifdef USE_AUTH_VAULT
+#include <sec/authenticator_call.h>
+#include "syscall_probe.h"
+#endif
 
 static inline bool syscall_is_allowed(const applet_t *applet,
                                       uint32_t syscall) {
@@ -318,6 +329,7 @@ __attribute((no_stack_protector)) void syscall_handler(uint32_t *args,
       notify_send(event);
     } break;
 
+#ifndef AUTHENTICATOR
     case SYSCALL_DISPLAY_SET_BACKLIGHT: {
       uint8_t level = (uint8_t)args[0];
       args[0] = display_set_backlight(level);
@@ -362,6 +374,7 @@ __attribute((no_stack_protector)) void syscall_handler(uint32_t *args,
     case SYSCALL_DISPLAY_REFRESH: {
       display_refresh();
     } break;
+#endif
 
     case SYSCALL_USB_START: {
       const usb_start_params_t *params = (const usb_start_params_t *)args[0];
@@ -596,6 +609,108 @@ __attribute((no_stack_protector)) void syscall_handler(uint32_t *args,
     } break;
 #endif
 
+#ifdef USE_AUTH_VAULT
+    case SYSCALL_AUTH_STATUS:
+      args[0] = auth_call_status((auth_status *)args[0], probe_write_access);
+      break;
+    case SYSCALL_AUTH_PROVISION:
+      args[0] = auth_call_provision((const uint8_t *)args[0], args[1],
+                                    probe_read_access);
+      break;
+    case SYSCALL_AUTH_CHANGE_PIN:
+      args[0] = auth_call_change((const uint8_t *)args[0], args[1],
+                                 (const uint8_t *)args[2], args[3],
+                                 probe_read_access);
+      break;
+    case SYSCALL_AUTH_KEY_AGREEMENT:
+      args[0] =
+          auth_call_public((uint8_t *)args[0], args[1], probe_write_access);
+      break;
+    case SYSCALL_AUTH_ISSUE_TOKEN:
+      args[0] = auth_call_issue((const auth_token_request *)args[0],
+                                probe_read_access, probe_write_access);
+      break;
+    case SYSCALL_AUTH_SET_PIN:
+      // Read probe only: the PIN travels inward and nothing comes back but the
+      // result code, so there is no application buffer to write or to alias.
+      args[0] = auth_call_set_pin((const auth_set_pin_request *)args[0],
+                                  probe_read_access);
+      break;
+    case SYSCALL_AUTH_CHECK_AUTH:
+      args[0] =
+          auth_call_check((const auth_mac_request *)args[0], probe_read_access);
+      break;
+    case SYSCALL_AUTH_CLEAR_SESSION:
+      args[0] = auth_vault_clear_session();
+      break;
+    case SYSCALL_AUTH_DISCONNECT:
+      args[0] = auth_vault_disconnect();
+      break;
+    case SYSCALL_AUTH_WIPE:
+      args[0] = auth_vault_wipe();
+      break;
+    case SYSCALL_AUTH_CREDENTIAL_CREATE:
+      args[0] =
+          auth_call_credential_create((const auth_create_request *)args[0],
+                                      probe_read_access, probe_write_access);
+      break;
+    case SYSCALL_AUTH_CREDENTIAL_OPEN:
+      args[0] =
+          auth_call_credential_open((const auth_open_request *)args[0],
+                                    probe_read_access, probe_write_access);
+      break;
+    case SYSCALL_AUTH_CREDENTIAL_SIGN:
+      args[0] =
+          auth_call_credential_sign((const auth_sign_request *)args[0],
+                                    probe_read_access, probe_write_access);
+      break;
+    case SYSCALL_AUTH_CREDENTIAL_HMAC:
+      args[0] =
+          auth_call_credential_hmac((const auth_hmac_request *)args[0],
+                                    probe_read_access, probe_write_access);
+      break;
+    case SYSCALL_AUTH_RESIDENT_GET:
+      args[0] = args[0] < 100 ? auth_call_resident_get(
+                                    args[0], (auth_credential_public *)args[1],
+                                    probe_write_access)
+                              : auth_call_resident_delete(100);
+      break;
+    case SYSCALL_AUTH_RESIDENT_SET:
+      // One past the last slot is the documented "the vault chooses"; anything
+      // beyond that is still refused through the invalid-index path.
+      args[0] = args[0] <= 100
+                    ? auth_call_resident_set(args[0],
+                                             (const auth_open_request *)args[1],
+                                             probe_read_access)
+                    : auth_call_resident_delete(100);
+      break;
+    case SYSCALL_AUTH_RESIDENT_DELETE:
+      args[0] = auth_call_resident_delete(args[0] < 100 ? args[0] : 100);
+      break;
+    case SYSCALL_AUTH_RESIDENT_SCAN:
+      args[0] =
+          auth_call_resident_scan((const uint8_t *)args[0], (uint8_t *)args[1],
+                                  probe_read_access, probe_write_access);
+      break;
+#endif
+
+#ifdef USE_AUTH_PRESENCE
+    case SYSCALL_AUTH_PRESENCE_SAMPLE:
+      // No arguments, no buffers, no probes to run: the whole reply is one
+      // enumerated reading placed in a register. The pin is configured here
+      // on the first reading and never released, so the application can ask
+      // what the line says and nothing more.
+      args[0] = auth_presence_sample();
+      break;
+#endif
+// Subsystems whose flash areas the authenticator vault owns outright. Ordinary
+// storage writes STORAGE_AREAS[0] and STORAGE_AREAS[1], translations write
+// ASSETS_AREA; on that project those three areas are vault replicas 0, 1 and 2.
+// Dispatching either from the unprivileged application would let it destroy the
+// redundancy the vault exists to provide, so the entry points are not reachable
+// rather than merely unused. The authenticator's own persistence goes through
+// SYSCALL_AUTH_* above, which take no generic key and no raw offset.
+#ifndef AUTHENTICATOR
     case SYSCALL_STORAGE_SETUP: {
       PIN_UI_WAIT_CALLBACK callback = (PIN_UI_WAIT_CALLBACK)args[0];
       storage_setup__verified(callback);
@@ -716,6 +831,7 @@ __attribute((no_stack_protector)) void syscall_handler(uint32_t *args,
     case SYSCALL_TRANSLATIONS_AREA_BYTESIZE: {
       args[0] = translations_area_bytesize();
     } break;
+#endif
 
     case SYSCALL_RNG_FILL_BUFFER: {
       void *buffer = (void *)args[0];

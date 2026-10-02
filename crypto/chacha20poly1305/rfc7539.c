@@ -4,6 +4,7 @@
 #include <string.h>
 #include "rfc7539.h"
 #include "ecrypt-portable.h"
+#include "memzero.h"
 
 // Initialize the ChaCha20 + Poly1305 context for encryption or decryption
 // using a 32 byte key and 12 byte nonce as in the RFC 7539 style.
@@ -20,6 +21,7 @@ void rfc7539_init(chacha20poly1305_ctx *ctx, const uint8_t key[32], const uint8_
     // as the Poly1305 key.
     ECRYPT_encrypt_bytes(&ctx->chacha20, block0, block0, 64);
     poly1305_init(&ctx->poly1305, block0);
+    memzero(block0, sizeof(block0));
 }
 
 // Include authenticated data in the Poly1305 MAC using the RFC 7539

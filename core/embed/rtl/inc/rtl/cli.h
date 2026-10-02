@@ -103,6 +103,16 @@ struct cli {
 
   /** Current line buffer */
   char line_buffer[CLI_LINE_BUFFER_SIZE];
+  /** Maximum accepted raw input length for this instance. */
+  size_t line_limit;
+  /** Number of non-newline bytes received for the current input line. */
+  size_t raw_line_len;
+  /** Set after raw input exceeds line_limit; cleared with the current line. */
+  bool line_overflow;
+  /** Reject non-printable bytes instead of interpreting terminal controls. */
+  bool strict_input;
+  /** Set after strict input sees an invalid byte; cleared with the line. */
+  bool invalid_input;
   /** number of characters in the buffer (excluding '\0') */
   int line_len;
   /** cursor position in the buffer */
@@ -149,6 +159,25 @@ struct cli {
 /** Initializes the command line structure */
 bool cli_init(cli_t* cli, cli_read_cb_t read, cli_write_cb_t write,
               void* callback_context);
+
+/**
+ * Sets the maximum accepted raw input length for one CLI instance.
+ *
+ * Every non-newline byte is counted before control/edit interpretation. A
+ * zero value or a value larger than CLI_LINE_BUFFER_SIZE restores the default.
+ * Input that exceeds the limit is rejected as one complete command; it is
+ * never dispatched in truncated form.
+ */
+void cli_set_line_limit(cli_t* cli, size_t limit);
+
+/**
+ * Enables or disables strict raw input validation for one CLI instance.
+ *
+ * In strict mode, only printable ASCII plus CR/LF line endings are accepted.
+ * A line containing any other byte is drained through its terminator and
+ * rejected without dispatching a command. Strict mode is disabled by default.
+ */
+void cli_set_strict_input(cli_t* cli, bool enabled);
 
 /** Registers the command handlers */
 void cli_set_commands(cli_t* cli, const cli_command_t* cmd_array,

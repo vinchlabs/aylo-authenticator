@@ -2,10 +2,12 @@
 
 #include <trezor_model.h>
 
+#ifndef AUTHENTICATOR
 #include <io/display.h>
 #include <io/display_utils.h>
 #include <io/gfx_bitblt.h>
 #include <io/translations.h>
+#endif
 #include <io/usb.h>
 #include <rtl/secbool.h>
 #include <sys/flash.h>
@@ -60,5 +62,7 @@
 #include "uzlib.h"
 
 // force bindgen to include these constants
+#ifndef AUTHENTICATOR
 const uint32_t DISPLAY_RESX_ = DISPLAY_RESX;
 const uint32_t DISPLAY_RESY_ = DISPLAY_RESY;
+#endif

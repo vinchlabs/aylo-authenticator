@@ -27,6 +27,72 @@
 #include "rust_ui_bootloader.h"
 #include "version.h"
 
+#if defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION
+
+// This local development image has no display or touch. The firmware upload
+// path validates the vendor and image signatures before asking for consent,
+// but the development signing keys are public. Never use this image with real
+// wallet secrets: anyone can sign an accepted image, with no physical consent.
+static bool initial_setup = true;
+
+void ui_set_initial_setup(bool initial) { initial_setup = initial; }
+bool ui_get_initial_setup(void) { return initial_setup; }
+void ui_screen_boot(const fw_ui_info_t *info, int wait) {
+  (void)info;
+  (void)wait;
+}
+uint32_t ui_screen_intro(const fw_ui_info_t *info, bool fw_ok) {
+  (void)info;
+  (void)fw_ok;
+  return 0;
+}
+confirm_result_t ui_screen_install_confirm(const vendor_header *vhdr,
+                                           const image_header *hdr,
+                                           secbool should_keep_seed,
+                                           secbool is_newvendor,
+                                           secbool is_newinstall,
+                                           int version_cmp) {
+  (void)vhdr;
+  (void)hdr;
+  (void)should_keep_seed;
+  (void)is_newvendor;
+  (void)is_newinstall;
+  (void)version_cmp;
+  return CONFIRM;
+}
+void ui_screen_install_start(bool wireless) { (void)wireless; }
+void ui_screen_install_progress_erase(int pos, int len, bool wireless) {
+  (void)pos;
+  (void)len;
+  (void)wireless;
+}
+void ui_screen_install_progress_upload(int pos, bool wireless) {
+  (void)pos;
+  (void)wireless;
+}
+confirm_result_t ui_screen_wipe_confirm(void) { return CANCEL; }
+void ui_screen_wipe(void) {}
+void ui_screen_wipe_progress(int pos, int len) {
+  (void)pos;
+  (void)len;
+}
+void ui_screen_done(uint8_t restart_seconds, secbool full_redraw) {
+  (void)restart_seconds;
+  (void)full_redraw;
+}
+void ui_screen_boot_stage_1(bool fading) { (void)fading; }
+void ui_screen_fail(void) {}
+void ui_fadein(void) {}
+void ui_fadeout(void) {}
+
+#ifdef LOCKABLE_BOOTLOADER
+uint32_t ui_screen_unlock_bootloader_confirm(void) { return 0; }
+#else
+void ui_screen_install_restricted(void) {}
+#endif
+
+#else
+
 // common shared functions
 
 #define VERSION_STRING_LEN 16
@@ -137,3 +203,5 @@ uint32_t ui_screen_confirm_pairing(uint32_t code) {
   return screen_confirm_pairing(code, initial_setup);
 }
 #endif
+
+#endif  // TS5_HEADLESS_DEV && TREZOR_MODEL_T3T1 && !PRODUCTION

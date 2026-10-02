@@ -712,7 +712,11 @@ MP_NOINLINE int main_(int argc, char **argv) {
   }
 
   if (ret == NOTHING_EXECUTED && default_import) {
+#ifdef AUTHENTICATOR
+    ret = do_import_module("authenticator_boot");
+#else
     ret = do_import_module("main");
+#endif
   }
 
   const char *inspect_env = getenv("MICROPYINSPECT");

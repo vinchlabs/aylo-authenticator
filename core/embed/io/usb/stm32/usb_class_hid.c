@@ -30,6 +30,7 @@
 #endif
 
 #include "usb_internal.h"
+#include "usb_authenticator_desc.h"
 
 #define USB_CLASS_HID 0x03
 
@@ -40,23 +41,6 @@
 #define USB_HID_REQ_GET_PROTOCOL 0x03
 #define USB_HID_REQ_SET_IDLE 0x0A
 #define USB_HID_REQ_GET_IDLE 0x02
-
-typedef struct __attribute__((packed)) {
-  uint8_t bLength;
-  uint8_t bDescriptorType;
-  uint16_t bcdHID;
-  uint8_t bCountryCode;
-  uint8_t bNumDescriptors;
-  uint8_t bReportDescriptorType;
-  uint16_t wReportDescriptorLength;
-} usb_hid_descriptor_t;
-
-typedef struct __attribute__((packed)) {
-  usb_interface_descriptor_t iface;
-  usb_hid_descriptor_t hid;
-  usb_endpoint_descriptor_t ep_in;
-  usb_endpoint_descriptor_t ep_out;
-} usb_hid_descriptor_block_t;
 
 /* usb_hid_state_t encapsulates all state used by enabled HID interface.  It
  * needs to be completely initialized in usb_hid_add and reset in
@@ -117,6 +101,19 @@ secbool usb_hid_add(const usb_hid_info_t *info) {
     return secfalse;
   }
 
+#ifdef AUTHENTICATOR
+  const authenticator_usb_descriptors_t *canonical =
+      &g_authenticator_usb_descriptors;
+  if (info->iface_num != canonical->hid.iface.bInterfaceNumber ||
+      info->report_desc != canonical->report ||
+      info->report_desc_len != sizeof(canonical->report) ||
+      info->ep_in != (canonical->hid.ep_in.bEndpointAddress & ~USB_EP_DIR_IN) ||
+      info->ep_out != canonical->hid.ep_out.bEndpointAddress ||
+      info->max_packet_len != canonical->hid.ep_in.wMaxPacketSize) {
+    return secfalse;
+  }
+#endif
+
   // Interface descriptor
   d->iface.bLength = sizeof(usb_interface_descriptor_t);
   d->iface.bDescriptorType = USB_DESC_TYPE_INTERFACE;
@@ -152,6 +149,11 @@ secbool usb_hid_add(const usb_hid_info_t *info) {
   d->ep_out.bmAttributes = USBD_EP_TYPE_INTR;
   d->ep_out.wMaxPacketSize = info->max_packet_len;
   d->ep_out.bInterval = info->polling_interval;
+
+#ifdef AUTHENTICATOR
+  // The descriptors presented to the host are the audited linked bytes.
+  memcpy(d, &canonical->hid, sizeof(*d));
+#endif
 
   // Interface state
   state->handle = info->handle;

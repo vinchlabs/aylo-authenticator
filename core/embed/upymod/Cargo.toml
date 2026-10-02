@@ -17,6 +17,10 @@ sec.workspace = true
 io.workspace = true
 
 [features]
+authenticator = ["io/usb_iface_webauthn", "sec/authenticator"]
+authenticator_test_presence = []
+authenticator_assumed_presence = []
+authenticator_test_backend = ["sec/authenticator_test_backend"]
 
 # --------------------------------------------------------------------------
 # MCU selection - only enable one of these at a time

@@ -26,21 +26,26 @@
 #include "protob/protob.h"
 #include "workflow_common.h"
 
-workflow_result_t workflow_firmware_update(protob_io_t *iface);
+workflow_result_t workflow_firmware_update(protob_io_t *iface,
+                                           bool *request_decoded);
 
-workflow_result_t workflow_wipe_device(protob_io_t *iface);
+workflow_result_t workflow_wipe_device(protob_io_t *iface,
+                                       bool *request_decoded);
 
 #ifdef LOCKABLE_BOOTLOADER
-workflow_result_t workflow_unlock_bootloader(protob_io_t *iface);
+workflow_result_t workflow_unlock_bootloader(protob_io_t *iface,
+                                             bool *request_decoded);
 #endif
 
-workflow_result_t workflow_ping(protob_io_t *iface);
+workflow_result_t workflow_ping(protob_io_t *iface, bool *request_decoded);
 
 workflow_result_t workflow_initialize(protob_io_t *iface,
-                                      const fw_check_info_t *fw);
+                                      const fw_check_info_t *fw,
+                                      bool *request_decoded);
 
 workflow_result_t workflow_get_features(protob_io_t *iface,
-                                        const fw_check_info_t *fw);
+                                        const fw_check_info_t *fw,
+                                        bool *request_decoded);
 
 workflow_result_t workflow_menu(const fw_check_info_t *fw, protob_ios_t *ios);
 

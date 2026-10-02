@@ -54,6 +54,21 @@ pub fn def_module(lib: &mut CLibrary) -> Result<()> {
 
             lib.add_sources(["flash/stm32u5/flash.c", "flash/stm32u5/flash_otp.c"]);
         }
+
+        // Checked, ECC-aware reads for the authenticator's three replica areas.
+        // The policy layer allowlists STORAGE_AREAS and ASSETS_AREA by identity,
+        // and flash_layout.c only defines those in a secure kernel build, so the
+        // module is limited to the same configurations.
+        if cfg!(feature = "kernel_mode") && cfg!(feature = "secure_mode") {
+            lib.add_source("flash/flash_checked_policy.c");
+
+            if cfg!(feature = "emulator") {
+                lib.add_source("flash/unix/flash_checked.c");
+            } else {
+                lib.add_source("flash/stm32u5/flash_checked.c");
+            }
+
+        }
     } else {
         bail_unsupported!();
     }

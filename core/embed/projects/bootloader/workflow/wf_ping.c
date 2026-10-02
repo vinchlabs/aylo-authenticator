@@ -23,11 +23,19 @@
 #include "protob.h"
 #include "workflow.h"
 
-workflow_result_t workflow_ping(protob_io_t *iface) {
+workflow_result_t workflow_ping(protob_io_t *iface, bool *request_decoded) {
+  if (request_decoded != NULL) {
+    *request_decoded = false;
+  }
+
   Ping msg_recv;
   if (sectrue != recv_msg_ping(iface, &msg_recv)) {
     return WF_ERROR;
   }
+  if (request_decoded != NULL) {
+    *request_decoded = true;
+  }
+
   send_msg_success(iface, msg_recv.message);
   return WF_OK;
 }

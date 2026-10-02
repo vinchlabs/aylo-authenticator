@@ -30,18 +30,24 @@ MODEL = ModelData(
     model_class=ModelClass.CORE,
     layout=Layout.DELIZIA,
     ble_capable=False,
+    # The aylo authenticator's own keys, replacing SatoshiLabs' for this project.
+    # These must stay equal to MODEL_BOARDLOADER_KEYS and MODEL_BOOTLOADER_KEYS in
+    # core/embed/models/T3T1/model_T3T1.h: the C side decides what the device accepts
+    # and this side decides what headertool and audit_image report, so if they drift
+    # the tools call a good image invalid, or worse call a bad one valid. root_keys.h
+    # says the same thing about its own pair of lists.
     prod_keys=KeySet(
         production=True,
         boardloader_keys=keys(
-            "76af426e61406bad7c077b409c66fde39fb817919313ae1e4c02535c80beed96",
-            "619751dc8d2d09d7e5dfb99e41f606debdf419f85a8143e8e5399ea67a3988c7",
-            "abf94b6615a7dde2a871f7d62c38efc7d9d8f6010d8846bee636e4f3e658a38c",
+            "7cfd63aaa1994671b92de7370109ec7bd4f0497a76579ee6d6c65649a7f57fb2",
+            "bad3746ec834191047e94f5f3755655d6864e58c849a9fc1d7d74b9e3c4b78b4",
+            "7d094e145978f769658621e64e78849f5fddd49f37c01a7a942b2483ead36bb6",
         ),
         boardloader_sigs_needed=2,
         bootloader_keys=keys(
-            "338b949b7e3b26470d4fe3696fd6fff28757265d14cca48ebf2db97b4f5bc039",
-            "28682027730b783201b05a8c9d11685447c17297db71b8a60dc693a44610751d",
-            "9fbf31b4e351a4cc81c75995b2257f0a7169268da5a44e94b6a5590d434e32da",
+            "aa1737dfdab207ff95ba42e03a1d377b8f5b700df76d297652b1e309c4fc5b8d",
+            "8e798e39cce1b11902e6c9444b05cf38c3ffbb282fdb527c36a70483b7856031",
+            "fa77d38502010565433e56c00180ad6280ee0707678b7861f937ac63c01eaffb",
         ),
         bootloader_sigs_needed=2,
     ),

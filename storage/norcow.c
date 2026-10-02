@@ -278,6 +278,84 @@ void norcow_init(uint32_t *norcow_version) {
   }
 }
 
+#ifdef USE_AUTH_VAULT
+static secbool auth_erased_range(uint8_t sector, uint32_t offset) {
+  uint32_t size = flash_area_get_size(&STORAGE_AREAS[sector]);
+  if (offset > size) return secfalse;
+  if (offset == size) return sectrue;  // Empty suffix has no flash address.
+  const uint8_t *bytes = norcow_ptr(sector, offset, size - offset);
+  if (bytes == NULL) return secfalse;
+  for (uint32_t i = 0; i < size - offset; i++)
+    if (bytes[i] != 0xff) return secfalse;
+  return sectrue;
+}
+
+norcow_auth_state norcow_auth_open(secbool create) {
+  int active = -1;
+  for (uint8_t sector = 0; sector < NORCOW_SECTOR_COUNT; sector++) {
+    if (auth_erased_range(sector, 0) == sectrue) continue;
+    uint32_t offset = 0, version = 0;
+    if (active >= 0 ||
+        find_start_offset(sector, &offset, &version) != sectrue ||
+        version != NORCOW_VERSION)
+      return NORCOW_AUTH_ERROR;
+    uint32_t size = flash_area_get_size(&STORAGE_AREAS[sector]);
+    for (;;) {
+      if (auth_erased_range(sector, offset) == sectrue) break;
+      uint16_t key = 0, len = 0;
+      const void *value = NULL;
+      uint32_t next = offset;
+      if (read_item(sector, offset, &key, &value, &len, &next) != sectrue ||
+          next <= offset || next > size)
+        return NORCOW_AUTH_ERROR;
+#ifndef FLASH_BIT_ACCESS
+      // The normal reader treats ANY non-0xff valid flag as deleted. That is
+      // insufficient here: corrupt/partially deleted records must not become
+      // invisible aliases or an apparently empty, reprovisionable namespace.
+      if (key == NORCOW_KEY_DELETED) {
+        const uint8_t *cleared = value;
+        uint32_t count = (uint32_t)len + NORCOW_VALID_FLAG_LEN;
+        if (len <= NORCOW_SMALL_ITEM_SIZE) {
+          cleared = norcow_ptr(sector, offset, FLASH_BLOCK_SIZE);
+          count = FLASH_BLOCK_SIZE;
+        }
+        if (cleared == NULL) return NORCOW_AUTH_ERROR;
+        for (uint32_t i = 0; i < count; i++)
+          if (cleared[i] != 0) return NORCOW_AUTH_ERROR;
+      }
+#endif
+      offset = next;
+    }
+    active = sector;
+    norcow_free_offset = offset;
+  }
+  if (active < 0) {
+    if (create != sectrue) return NORCOW_AUTH_BLANK;
+    // All areas were verified byte-for-byte blank. Program only the header,
+    // never call norcow_init/wipe/erase or any ordinary-storage controller.
+    if (flash_unlock_write() != sectrue) return NORCOW_AUTH_ERROR;
+#if FLASH_BLOCK_WORDS == 1
+    flash_block_t magic = {NORCOW_MAGIC}, version = {~NORCOW_VERSION};
+    secbool written =
+        flash_area_write_block(&STORAGE_AREAS[0], NORCOW_HEADER_LEN, magic);
+    if (written == sectrue)
+      written = flash_area_write_block(
+          &STORAGE_AREAS[0], NORCOW_HEADER_LEN + NORCOW_MAGIC_LEN, version);
+#else
+    flash_block_t header = {NORCOW_MAGIC, ~NORCOW_VERSION};
+    secbool written =
+        flash_area_write_block(&STORAGE_AREAS[0], NORCOW_HEADER_LEN, header);
+#endif
+    secbool locked = flash_lock_write();
+    if (written != sectrue || locked != sectrue) return NORCOW_AUTH_ERROR;
+    return norcow_auth_open(secfalse);
+  }
+  norcow_active_sector = norcow_write_sector = (uint8_t)active;
+  norcow_active_version = NORCOW_VERSION;
+  return NORCOW_AUTH_READY;
+}
+#endif
+
 /*
  * Wipe the storage
  */

@@ -34,6 +34,7 @@
 #include <sys/bootutils.h>
 #include <sys/flash_utils.h>
 #include <sys/startup_args.h>
+#include <sys/sysevent.h>
 #include <sys/system.h>
 #include <sys/systick.h>
 #include <sys/types.h>
@@ -106,6 +107,10 @@
 #include "wire/wire_iface_usb.h"
 #include "workflow/workflow.h"
 
+#if defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION
+#include "headless_boot_policy.h"
+#endif
+
 #ifdef DEBUGLINK
 #include "workflow/debuglink.h"
 #endif
@@ -144,6 +149,7 @@ static secbool is_manufacturing_mode(void) {
   return manufacturing_mode;
 }
 
+#if !(defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION)
 static void display_touch_init(secbool manufacturing_mode,
                                secbool *touch_initialized) {
   display_init(DISPLAY_RESET_CONTENT);
@@ -159,6 +165,7 @@ static void display_touch_init(secbool manufacturing_mode,
   }
 #endif
 }
+#endif
 
 static secbool boot_sequence(void) {
   secbool stay_in_bootloader = secfalse;
@@ -328,7 +335,8 @@ static void drivers_init(secbool manufacturing_mode,
   tamper_init();
 #endif
 
-#ifndef LAZY_DISPLAY_INIT
+#if !defined(LAZY_DISPLAY_INIT) && \
+    !(defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION)
   display_touch_init(manufacturing_mode, touch_initialized);
 #endif
 
@@ -365,7 +373,9 @@ static void drivers_deinit(void) {
   debuglink_deinit();
 #endif
 
+#if !(defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION)
   display_deinit(DISPLAY_JUMP_BEHAVIOR);
+#endif
 #ifdef USE_POWER_MANAGER
   pm_deinit();
 #endif
@@ -430,6 +440,7 @@ void real_jump_to_firmware(void) {
   secret_prepare_fw(info.secret_run_access, info.provisioning_access);
 #endif
 
+#if !(defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION)
   if (info.no_warning != sectrue) {
 #ifdef LAZY_DISPLAY_INIT
     display_touch_init(secfalse, NULL);
@@ -461,6 +472,7 @@ void real_jump_to_firmware(void) {
   if (DISPLAY_JUMP_BEHAVIOR == DISPLAY_RESET_CONTENT) {
     display_fade(display_get_backlight(), 0, 200);
   }
+#endif
 
 #ifdef USE_IWDG
   if (sectrue != info.allow_unlimited_run) {
@@ -491,7 +503,11 @@ int bootloader_main(void) {
   tz_init();
 #endif
 
+#if defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION
+  system_init(NULL);
+#else
   system_init(&rsod_panic_handler);
+#endif
 
 #ifdef USE_BOOT_UCB
   // By erasing UCB area we ensure that the boardloader will not repeat
@@ -504,6 +520,53 @@ int bootloader_main(void) {
   secbool stay_in_bootloader = boot_sequence();
 
   drivers_init(manufacturing_mode, &touch_initialized);
+
+#if defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION
+  fw_check_info_t headless_fw = {0};
+  fw_check(&headless_fw);
+
+  bool valid_firmware = headless_fw.firmware_present == sectrue &&
+                        headless_fw.firmware_present_backup == sectrue;
+  boot_command_t boot_command = bootargs_get_command();
+  bool forced_loader =
+      headless_forced_loader(stay_in_bootloader == sectrue, boot_command);
+
+  protob_ios_t ios;
+  workflow_ifaces_init(secfalse, &ios);
+  notify_send(NOTIFY_UNLOCK);
+
+  uint32_t deadline = ticks_timeout(5000);
+  bool recognized_session = false;
+
+  while (true) {
+    if (headless_should_jump(valid_firmware, forced_loader, recognized_session,
+                             ticks_expired(deadline))) {
+      workflow_ifaces_deinit(&ios);
+      firmware_jump_fn = real_jump_to_firmware;
+      firmware_jump_fn();
+    }
+
+    uint32_t poll_deadline = ticks_timeout(100);
+    if (valid_firmware && !forced_loader && !recognized_session) {
+      poll_deadline = headless_poll_deadline(ticks(), deadline, 100);
+    }
+
+    sysevents_t awaited = {.read_ready = 1 << SYSHANDLE_USB_WIRE};
+    sysevents_t signalled = {0};
+    sysevents_poll(&awaited, &signalled, poll_deadline);
+
+    if (signalled.read_ready & awaited.read_ready) {
+      bool recognized = false;
+      workflow_result_t result = bootloader_process_usb(&recognized);
+      recognized_session |= recognized;
+
+      if (result == WF_OK_FIRMWARE_INSTALLED || result == WF_OK_DEVICE_WIPED ||
+          result == WF_OK_BOOTLOADER_UNLOCKED) {
+        reboot_device();
+      }
+    }
+  }
+#endif
 
 #ifdef DISABLE_ANIMATION
   disable_animation(true);

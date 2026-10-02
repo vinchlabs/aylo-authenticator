@@ -16,7 +16,9 @@ pub enum Project {
     BootloaderCi,
     #[default]
     Firmware,
+    Authenticator,
     Prodtest,
+    Headless,
     Kernel,
     Secmon,
 }
@@ -29,7 +31,9 @@ impl Project {
             Project::Boardloader => "boardloader",
             Project::BootloaderCi => "bootloader_ci",
             Project::Firmware => "firmware",
+            Project::Authenticator => "authenticator",
             Project::Prodtest => "prodtest",
+            Project::Headless => "headless",
             Project::Kernel => "kernel",
             Project::Secmon => "secmon",
         }
@@ -43,7 +47,9 @@ impl Project {
             Project::BootloaderCi => "bootloader_ci",
             Project::Boardloader => "boardloader",
             Project::Firmware => "firmware",
+            Project::Authenticator => "authenticator",
             Project::Prodtest => "prodtest",
+            Project::Headless => "headless",
             Project::Kernel => "kernel",
             Project::Secmon => "secmon",
         }
@@ -65,7 +71,9 @@ impl Project {
         let symbol = match self {
             Project::Boardloader => "BOARDLOADER_START",
             Project::Bootloader | Project::BootloaderCi => "BOOTLOADER_START",
-            Project::Firmware | Project::Prodtest => "FIRMWARE_START",
+            Project::Firmware | Project::Authenticator | Project::Prodtest | Project::Headless => {
+                "FIRMWARE_START"
+            }
             _ => return Err(anyhow!("Flashing {:?} is not supported", self)),
         };
         Ok(symbol)
@@ -75,7 +83,7 @@ impl Project {
     /// (e.g. Firmware -> Kernel -> Secmon)
     pub fn dependency(self, model: Model) -> Result<Option<Project>> {
         match self {
-            Project::Firmware => Ok(Some(Project::Kernel)),
+            Project::Firmware | Project::Authenticator => Ok(Some(Project::Kernel)),
             Project::Kernel => {
                 let has_secmon = model.config()?.secmon;
                 Ok(if has_secmon {
@@ -97,7 +105,10 @@ impl Project {
     /// Returns whether the project can be uploaded to a device
     /// using the `upload` subcommand.
     pub fn uploadable(self) -> bool {
-        matches!(self, Project::Firmware | Project::Prodtest)
+        matches!(
+            self,
+            Project::Firmware | Project::Authenticator | Project::Prodtest | Project::Headless
+        )
     }
 }
 
@@ -248,4 +259,106 @@ pub struct CombineArgs {
 #[command(hide = true)] // Should probably go under some kind of misc subcommand.
 pub struct PrintVersionArgs {
     pub project: Project,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Project;
+    use crate::config::ProjectConfig;
+
+    #[test]
+    fn authenticator_is_uploadable_firmware() {
+        assert_eq!(Project::Authenticator.package_name(), "authenticator");
+        assert_eq!(Project::Authenticator.binary_name(), "authenticator");
+        assert_eq!(
+            Project::Authenticator
+                .dependency(super::Model::T3T1)
+                .unwrap(),
+            Some(Project::Kernel)
+        );
+        assert_eq!(
+            Project::Authenticator.flash_start_symbol().unwrap(),
+            "FIRMWARE_START"
+        );
+        assert!(Project::Authenticator.uploadable());
+    }
+
+    #[test]
+    fn authenticator_image_has_firmware_sections() {
+        let config = ProjectConfig::load(Project::Authenticator).unwrap();
+        assert_eq!(
+            config.elf_sections,
+            [".vendorheader", ".header", ".flash", ".data"]
+        );
+        assert!(!config.uses.iter().any(|feature| matches!(
+            feature.as_str(),
+            "display" | "touch" | "dma2d" | "framebuffer" | "haptic"
+        )));
+    }
+
+    #[test]
+    fn headless_is_uploadable_firmware() {
+        assert_eq!(Project::Headless.package_name(), "headless");
+        assert_eq!(
+            Project::Headless.flash_start_symbol().unwrap(),
+            "FIRMWARE_START"
+        );
+        assert!(Project::Headless.uploadable());
+    }
+
+    #[test]
+    fn headless_image_has_firmware_sections() {
+        let config = ProjectConfig::load(Project::Headless).unwrap();
+        assert_eq!(
+            config.elf_sections,
+            [".vendorheader", ".header", ".flash", ".data"]
+        );
+        assert_eq!(
+            config.uses,
+            [
+                "backlight",
+                "backup_ram",
+                "ble",
+                "boot_ucb",
+                "button",
+                "consumption_mask",
+                "display",
+                "display_mono",
+                "display_rgb565",
+                "display_rgba8888",
+                "dma2d",
+                "framebuffer",
+                "haptic",
+                "hash_processor",
+                "hw_revision",
+                "iwdg",
+                "layout_bolt",
+                "layout_caesar",
+                "layout_delizia",
+                "layout_eckhart",
+                "lockable_bootloader",
+                "mcu_attestation",
+                "nfc",
+                "nrf",
+                "optiga",
+                "power_manager",
+                "pvd",
+                "rgb_led",
+                "rtc",
+                "sbu",
+                "sd_card",
+                "sdram",
+                "secret",
+                "secmon_header",
+                "secure_aes",
+                "smp",
+                "suspend",
+                "tamper",
+                "telemetry",
+                "touch",
+                "touch_wakeup",
+                "tropic",
+            ]
+        );
+    }
 }

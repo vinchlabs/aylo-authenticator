@@ -1,0 +1,25 @@
+{
+    "header_len": 1024,
+    "text": "vinchlabs aylo authenticator",
+    "hw_model": "T3T1",
+    "expiry": 0,
+    "version": [
+        0,
+        1
+    ],
+    "sig_m": 2,
+    "trust": {
+        "deny_provisioning_access": true,
+        "allow_run_with_secret": true,
+        "show_vendor_string": false,
+        "require_user_click": false,
+        "red_background": false,
+        "delay": 0
+    },
+    "pubkeys": [
+        "f030ab519a1cc9ab7a3faab55841cc6a92041769d48add3f33689bd07b4dc5f5",
+        "f3af2a1d3b1e3f06d80de695d5faba06569d0173a92ca652f49e57be24e4e645",
+        "56432c5a97c8e275a078d21653461d994959ad99c98dd86c2452deecf6aeb518"
+    ],
+    "fw_type": 6
+}

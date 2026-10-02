@@ -22,7 +22,7 @@ xtask build <project> -m <model> [options]
 ```
 
 - `<project>` — what to build: `bootloader`, `boardloader`, `bootloader_ci`,
-  `firmware`, `prodtest`, `kernel`, `secmon`.
+  `firmware`, `prodtest`, `headless`, `kernel`, `secmon`.
 - `-m / --model <model>` — target model, e.g. `t3w1`, `t3t1`, `t2b1`, `d001`.
 - `-b / --board <board>` — board revision; defaults to the model's
   `default_board`.
@@ -43,8 +43,8 @@ xtask build <project> -m <model> [options]
 - `xtask flash-erase [section] -m <model>` — erase a flash section (`all`,
   `boardloader`, `bootloader`, `firmware`, `storage`).
 - `xtask reset -m <model>` — reset the connected device.
-- `xtask upload <project> -m <model>` — upload firmware/prodtest to a running
-  device.
+- `xtask upload <project> -m <model>` — upload firmware/prodtest/headless to a
+  running bootloader.
 - `xtask combine <project> -m <model>` — combine the boot chain (e.g.
   secmon + kernel + firmware) into a single flashable binary.
 
@@ -77,7 +77,9 @@ cannot be used bare:
 - `--debug-link` — enable debug link (on by default when `pyopt` is off).
 - `--dbg-console <none|vcp|swo|system-view>` — debug console backend.
 - `--disable-animation` — disable UI animations.
-- `--bootloader-devel` — use development bootloader.
+- `--bootloader-devel` — use development bootloader keys/configuration.
+- `--headless-dev` — explicit display-free timed bootloader mode; valid only
+  for a T3T1 hardware `bootloader` build together with `--bootloader-devel`.
 - `--force-bootloader-upgrade` — force bootloader upgrade on next boot.
 - `--asan` — enable AddressSanitizer.
 - `--source-lines` — include MicroPython source lines.
@@ -289,8 +291,8 @@ collected artifacts directory:
 So a project must be built before it can be flashed or uploaded. `flash` uses
 OpenOCD and the flash start address read from the model's `memory.ld`;
 `upload` uses `trezorctl fw update`. Only flashable projects
-(boardloader, bootloader, bootloader_ci, firmware, prodtest) can be flashed,
-and only `firmware`/`prodtest` can be uploaded.
+(boardloader, bootloader, bootloader_ci, firmware, prodtest, headless) can be
+flashed, and only `firmware`/`prodtest`/`headless` can be uploaded.
 
 `xtask flash <project> --combined` reads the combined image instead:
 

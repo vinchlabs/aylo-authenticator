@@ -4,6 +4,9 @@ use xbuild::{CLibrary, Result};
 
 fn main() -> Result<()> {
     xbuild::build_and_link("kernel", |lib| {
+        if cfg!(feature = "authenticator") {
+            lib.add_define("AUTHENTICATOR", Some("1"));
+        }
         lib.import_lib("io")?;
 
         lib.add_source("main.c");

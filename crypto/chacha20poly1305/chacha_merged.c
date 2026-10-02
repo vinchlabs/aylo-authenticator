@@ -6,6 +6,7 @@ Public domain.
 
 #include "ecrypt-sync.h"
 #include "ecrypt-portable.h"
+#include "memzero.h"
 
 #define ROTATE(v,c) (ROTL32(v,c))
 #define XOR(v,w) ((v) ^ (w))
@@ -73,7 +74,10 @@ void ECRYPT_encrypt_bytes(ECRYPT_ctx *x,const u8 *m,u8 *c,u32 bytes)
   u8 tmp[64] = {0};
   int i = 0;
 
-  if (!bytes) return;
+  if (!bytes) {
+    memzero(tmp, sizeof(tmp));
+    return;
+  }
 
   j0 = x->input[0];
   j1 = x->input[1];
@@ -188,6 +192,7 @@ void ECRYPT_encrypt_bytes(ECRYPT_ctx *x,const u8 *m,u8 *c,u32 bytes)
       }
       x->input[12] = j12;
       x->input[13] = j13;
+      memzero(tmp, sizeof(tmp));
       return;
     }
     bytes -= 64;

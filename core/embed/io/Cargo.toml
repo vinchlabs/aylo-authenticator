@@ -19,6 +19,7 @@ sec.workspace = true
 sys.workspace = true
 
 [features]
+authenticator = []
 
 # --------------------------------------------------------------------------
 # MCU selection - only enable one of these at a time
@@ -42,6 +43,7 @@ secure_mode = ["sec/secure_mode"]
 # --------------------------------------------------------------------------
 
 app_loading = ["sys/app_loading", "sec/mldsa44"]
+auth_presence = []
 backlight = []
 ble = ["nrf"]
 button = []

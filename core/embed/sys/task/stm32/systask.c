@@ -33,6 +33,11 @@
 #include <sys/systask.h>
 #include <sys/system.h>
 
+// The ECCD branch below records which replica a failing flash line belonged to
+// before the fatal path runs. That is production behaviour, not a probe
+// feature: without it a torn replica would kill every subsequent boot.
+#include <sys/flash_checked.h>
+
 // Disable stack protector for this file since it  may interfere
 // with the stack manipulation and fault handling
 #pragma GCC optimize("no-stack-protector")
@@ -861,6 +866,12 @@ __attribute__((naked, no_stack_protector)) void GTZC_IRQHandler(void) {
 }
 #endif
 
+// Takes no arguments on purpose. NMI_Handler tail-branches here with R0 = MSP
+// and R1 = EXC_RETURN, and an earlier design named those as parameters because
+// its ECCD containment path rewrote the stacked return address. That path was
+// removed: an ECCD is fatal now, and the only thing done here is to record
+// which replica the failing line belonged to. Nothing reads the exception
+// frame, so nothing should claim to.
 __attribute__((no_stack_protector, used)) static void nmi_handler(void) {
   mpu_mode_t mpu_mode = mpu_reconfig(MPU_MODE_DEFAULT);
 #ifdef STM32U5
@@ -896,6 +907,13 @@ __attribute__((no_stack_protector, used)) static void nmi_handler(void) {
 #else
     (void)addr;
     (void)bankid;
+    // Records which of the authenticator's replica areas the failing ECC line
+    // belongs to, when a checked read of that replica is in flight. The record
+    // goes to storage that survives the reboot the fatal path below performs,
+    // so the next boot refuses that replica instead of faulting on it again.
+    // This does not claim the fault and cannot prevent it: an unattributable
+    // ECCD is recorded against nothing and the behaviour here is unchanged.
+    flash_checked_record_eccd(FLASH->ECCR);
     // In application/prodtest this is a fatal error
     systask_exit_fault(false, __get_MSP());
 #endif

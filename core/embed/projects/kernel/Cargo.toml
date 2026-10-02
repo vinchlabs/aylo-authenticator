@@ -17,6 +17,36 @@ sec.workspace = true
 sys.workspace = true
 
 [features]
+authenticator = [
+    "sec/authenticator",
+    "io/authenticator",
+    # The confirmation line. One GPIO input, configured and read only here:
+    # the application reaches it through a single syscall that returns a
+    # reading and cannot configure or release the pin.
+    "io/auth_presence",
+    "sys/applets",
+    "io/kernel_mode",
+    "io/secure_mode",
+    "io/usb_iface_webauthn",
+    "sec/rdi",
+    # Closes the applet's read window onto the assets area, which is replica 2
+    # here. It exists on other models only so a UI applet can dereference the
+    # pointer translations_read() returns, and this project has no display.
+    "sys/authenticator_vault_areas",
+    # No "sec/storage". The authenticator vault owns the raw bytes of
+    # STORAGE_AREAS[0] and STORAGE_AREAS[1] as replicas 0 and 1, so NORCOW in
+    # this kernel is a writer into vault territory, not a co-tenant sharing a
+    # keyspace as it was before the replica swap. storage_wipe() alone erases two
+    # of the three copies, and it was reachable from the unprivileged application.
+    "models/kernel",
+    "crypto/aes_gcm",
+    "secret",
+    "secure_aes",
+    "optiga",
+    "hash_processor",
+    "tamper",
+    "lockable_bootloader",
+]
 
 # --------------------------------------------------------------------------
 # Build options

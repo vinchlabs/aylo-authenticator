@@ -29,6 +29,169 @@
 // system.h
 // =============================================================================
 
+#ifdef USE_AUTH_VAULT
+#include <sec/authenticator_call.h>
+
+auth_result auth_vault_init(void) { return AUTH_DENIED; }
+auth_status auth_vault_status(void) {
+  auth_status result = {.state = AUTH_ERROR};
+  syscall_invoke1((uint32_t)&result, SYSCALL_AUTH_STATUS);
+  return result;
+}
+auth_result auth_vault_provision(const uint8_t *pin, size_t len) {
+  return (auth_result)syscall_invoke2((uint32_t)pin, len,
+                                      SYSCALL_AUTH_PROVISION);
+}
+auth_result auth_vault_change_pin(const uint8_t *old_pin, size_t old_len,
+                                  const uint8_t *new_pin, size_t new_len) {
+  return (auth_result)syscall_invoke4((uint32_t)old_pin, old_len,
+                                      (uint32_t)new_pin, new_len,
+                                      SYSCALL_AUTH_CHANGE_PIN);
+}
+auth_result auth_vault_key_agreement(uint8_t *out, size_t len) {
+  return (auth_result)syscall_invoke2((uint32_t)out, len,
+                                      SYSCALL_AUTH_KEY_AGREEMENT);
+}
+auth_result auth_vault_issue_token(const uint8_t *pin, size_t pin_len,
+                                   uint8_t protocol, uint8_t permissions,
+                                   const uint8_t *rp, size_t rp_len,
+                                   const uint8_t *peer, size_t peer_len,
+                                   uint8_t *encrypted, size_t capacity,
+                                   size_t *written) {
+  auth_token_request request = {.pin = pin,
+                                .pin_len = pin_len,
+                                .protocol = protocol,
+                                .permissions = permissions,
+                                .rp = rp,
+                                .rp_len = rp_len,
+                                .peer = peer,
+                                .peer_len = peer_len,
+                                .encrypted = encrypted,
+                                .capacity = capacity,
+                                .written = written};
+  return (auth_result)syscall_invoke1((uint32_t)&request,
+                                      SYSCALL_AUTH_ISSUE_TOKEN);
+}
+auth_result auth_vault_set_pin(uint8_t protocol, const uint8_t *new_pin_enc,
+                               size_t new_pin_enc_len, const uint8_t *param,
+                               size_t param_len, const uint8_t *peer,
+                               size_t peer_len) {
+  auth_set_pin_request request = {.new_pin = new_pin_enc,
+                                  .new_pin_len = new_pin_enc_len,
+                                  .param = param,
+                                  .param_len = param_len,
+                                  .peer = peer,
+                                  .peer_len = peer_len,
+                                  .protocol = protocol};
+  return (auth_result)syscall_invoke1((uint32_t)&request, SYSCALL_AUTH_SET_PIN);
+}
+auth_result auth_vault_check_auth(uint8_t protocol, const uint8_t *message,
+                                  size_t len, const uint8_t *param,
+                                  size_t param_len, uint8_t permissions,
+                                  const uint8_t *rp, size_t rp_len) {
+  auth_mac_request request = {.protocol = protocol,
+                              .message = message,
+                              .message_len = len,
+                              .param = param,
+                              .param_len = param_len,
+                              .permissions = permissions,
+                              .rp = rp,
+                              .rp_len = rp_len};
+  return (auth_result)syscall_invoke1((uint32_t)&request,
+                                      SYSCALL_AUTH_CHECK_AUTH);
+}
+auth_result auth_vault_clear_session(void) {
+  return (auth_result)syscall_invoke0(SYSCALL_AUTH_CLEAR_SESSION);
+}
+auth_result auth_vault_disconnect(void) {
+  return (auth_result)syscall_invoke0(SYSCALL_AUTH_DISCONNECT);
+}
+auth_result auth_vault_wipe(void) {
+  return (auth_result)syscall_invoke0(SYSCALL_AUTH_WIPE);
+}
+#endif  // USE_AUTH_VAULT
+
+#ifdef USE_AUTH_PRESENCE
+#include <io/auth_presence.h>
+
+// Only the reading. auth_presence_init() and auth_presence_deinit() have no
+// stub on purpose: the unprivileged application cannot configure, reconfigure
+// or release the confirmation line, and a call from here would fail to link
+// rather than be refused at runtime.
+auth_presence_state auth_presence_sample(void) {
+  return (auth_presence_state)syscall_invoke0(SYSCALL_AUTH_PRESENCE_SAMPLE);
+}
+#endif  // USE_AUTH_PRESENCE
+
+#ifdef USE_AUTH_VAULT
+auth_result auth_credential_create(const uint8_t rp[32], int32_t algorithm,
+                                   const uint8_t *metadata, size_t len,
+                                   auth_credential_public *out) {
+  auth_create_request request = {.rp = rp,
+                                 .algorithm = algorithm,
+                                 .metadata = metadata,
+                                 .metadata_len = len,
+                                 .out = out};
+  return (auth_result)syscall_invoke1((uint32_t)&request,
+                                      SYSCALL_AUTH_CREDENTIAL_CREATE);
+}
+auth_result auth_credential_open(const uint8_t *id, size_t len,
+                                 const uint8_t rp[32],
+                                 auth_credential_public *out) {
+  auth_open_request request = {.rp = rp, .id = id, .id_len = len, .out = out};
+  return (auth_result)syscall_invoke1((uint32_t)&request,
+                                      SYSCALL_AUTH_CREDENTIAL_OPEN);
+}
+auth_result auth_credential_sign(const uint8_t *id, size_t len,
+                                 const uint8_t rp[32], int32_t algorithm,
+                                 const uint8_t *message, size_t message_len,
+                                 bool attesting, uint8_t signature[72],
+                                 size_t *written) {
+  auth_sign_request request = {.rp = rp,
+                               .id = id,
+                               .id_len = len,
+                               .algorithm = algorithm,
+                               .message = message,
+                               .message_len = message_len,
+                               .attesting = attesting,
+                               .out = signature,
+                               .written = written};
+  return (auth_result)syscall_invoke1((uint32_t)&request,
+                                      SYSCALL_AUTH_CREDENTIAL_SIGN);
+}
+auth_result auth_credential_hmac_secret(const uint8_t *id, size_t len,
+                                        const uint8_t rp[32],
+                                        const uint8_t *salts, size_t salts_len,
+                                        uint8_t out[64]) {
+  auth_hmac_request request = {.rp = rp,
+                               .id = id,
+                               .id_len = len,
+                               .salts = salts,
+                               .salts_len = salts_len,
+                               .out = out};
+  return (auth_result)syscall_invoke1((uint32_t)&request,
+                                      SYSCALL_AUTH_CREDENTIAL_HMAC);
+}
+auth_result auth_resident_get(uint8_t index, auth_credential_public *out) {
+  return (auth_result)syscall_invoke2(index, (uint32_t)out,
+                                      SYSCALL_AUTH_RESIDENT_GET);
+}
+auth_result auth_resident_set(uint8_t index, const uint8_t *id, size_t len,
+                              const uint8_t rp[32]) {
+  auth_open_request request = {.rp = rp, .id = id, .id_len = len};
+  return (auth_result)syscall_invoke2(index, (uint32_t)&request,
+                                      SYSCALL_AUTH_RESIDENT_SET);
+}
+auth_result auth_resident_delete(uint8_t index) {
+  return (auth_result)syscall_invoke1(index, SYSCALL_AUTH_RESIDENT_DELETE);
+}
+auth_result auth_resident_scan(const uint8_t rp[32],
+                               uint8_t out[AUTH_RESIDENT_CAPACITY]) {
+  return (auth_result)syscall_invoke2((uint32_t)rp, (uint32_t)out,
+                                      SYSCALL_AUTH_RESIDENT_SCAN);
+}
+#endif
+
 #include <sys/system.h>
 
 void system_exit(int exit_code) {
@@ -225,6 +388,7 @@ void notify_send(notification_event_t event) {
 // display.h
 // =============================================================================
 
+#ifndef AUTHENTICATOR
 #include <io/display.h>
 
 bool display_set_backlight(uint8_t level) {
@@ -266,6 +430,7 @@ void display_copy_rgb565(const gfx_bitblt_t *bb) {
 }
 
 void display_refresh(void) { syscall_invoke0(SYSCALL_DISPLAY_REFRESH); }
+#endif
 
 // =============================================================================
 // usb.h
@@ -553,6 +718,12 @@ bool telemetry_get(telemetry_data_t *out) {
 // storage.h
 // =============================================================================
 
+// Not built for the authenticator. Ordinary storage owns STORAGE_AREAS[0] and
+// STORAGE_AREAS[1], which on that project are vault replicas 0 and 1; a stub
+// here is what makes storage_wipe() callable from unprivileged code, and it
+// would erase two of the three copies. Same reason as the translations block
+// below, which owns ASSETS_AREA, i.e. replica 2.
+#ifndef AUTHENTICATOR
 #include <sec/storage.h>
 
 static PIN_UI_WAIT_CALLBACK storage_init_callback = NULL;
@@ -666,6 +837,7 @@ void translations_erase(void) { syscall_invoke0(SYSCALL_TRANSLATIONS_ERASE); }
 uint32_t translations_area_bytesize(void) {
   return syscall_invoke0(SYSCALL_TRANSLATIONS_AREA_BYTESIZE);
 }
+#endif  // AUTHENTICATOR
 
 // =============================================================================
 // rng.h

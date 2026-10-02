@@ -510,7 +510,18 @@ mpu_mode_t mpu_reconfig(mpu_mode_t mode) {
 #endif
     case MPU_MODE_APP_SAES:
     case MPU_MODE_APP:
+#ifdef AUTHENTICATOR_VAULT_AREAS
+      // The assets area is the authenticator's third vault replica, and this
+      // project has no display, so the applet has no translations to read out of
+      // it. The window exists on other models only so a UI applet can
+      // dereference the pointer translations_read() returns; leaving it open
+      // here would let unprivileged code read the credential inventory -- rp id
+      // hashes, credential ids, the occupancy bitmap -- with no PIN-authorized
+      // session, which is what every sanctioned resident read requires.
+      DIS_REGION( 6 );
+#else
       SET_REGION( 6, ASSETS_START,             ASSETS_MAXSIZE,     FLASH_DATA,   NO,   YES );
+#endif
       break;
     default:
 #ifndef BOARDLOADER

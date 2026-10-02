@@ -24,9 +24,20 @@
 #include "workflow.h"
 
 workflow_result_t workflow_get_features(protob_io_t *iface,
-                                        const fw_check_info_t *fw) {
+                                        const fw_check_info_t *fw,
+                                        bool *request_decoded) {
+  if (request_decoded != NULL) {
+    *request_decoded = false;
+  }
+
   GetFeatures msg_recv;
-  recv_msg_get_features(iface, &msg_recv);
+  if (sectrue != recv_msg_get_features(iface, &msg_recv)) {
+    return WF_ERROR;
+  }
+  if (request_decoded != NULL) {
+    *request_decoded = true;
+  }
+
   send_msg_features(iface, fw);
   return WF_OK;
 }

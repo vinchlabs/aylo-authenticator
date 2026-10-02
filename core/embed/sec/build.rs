@@ -1,5 +1,8 @@
 use xbuild::{Result, build_mods};
 
+#[path = "authenticator/build.rs"]
+mod authenticator;
+
 #[path = "backup_ram/build.rs"]
 mod backup_ram;
 #[path = "board_capabilities/build.rs"]
@@ -62,6 +65,7 @@ fn main() -> Result<()> {
         build_mods!(
             lib,
             [
+                authenticator if cfg!(feature = "authenticator"),
                 backup_ram if cfg!(feature = "backup_ram"),
                 board_capabilities,
                 consumption_mask if cfg!(feature = "consumption_mask"),
@@ -92,6 +96,18 @@ fn main() -> Result<()> {
             ]
         );
 
+        // The authenticator links no ordinary storage: the vault owns the raw
+        // bytes of STORAGE_AREAS[0] and STORAGE_AREAS[1] as replicas 0 and 1, so
+        // NORCOW there would write into vault territory. It still needs the
+        // header, because optiga.h includes <sec/storage.h> for PIN_MAX_TRIES and
+        // STRETCHED_PIN_COUNT -- secure-element retry constants that happen to
+        // live in the storage header rather than anything NORCOW does. So the
+        // include path is added on its own: no sources, and deliberately no
+        // USE_STORAGE, which would tell the rest of the tree a storage engine is
+        // present.
+        if cfg!(feature = "authenticator") && cfg!(not(feature = "storage")) {
+            lib.add_include("storage/inc");
+        }
         if cfg!(feature = "bootloader_devel") {
             lib.add_define("BOOTLOADER_DEVEL", Some("1"));
         }
@@ -103,6 +119,13 @@ fn main() -> Result<()> {
 
         if cfg!(feature = "test") {
             lib.add_source("src/test_setup.c");
+            lib.add_include("authenticator/inc");
+            lib.add_source("authenticator/tests/test_authenticator.c");
+            lib.add_source("authenticator/tests/test_authenticator_crypto.c");
+            lib.add_source("authenticator/tests/test_authenticator_call.c");
+            lib.add_include("optiga/inc");
+            lib.add_include("storage/inc");
+            lib.add_source("authenticator/tests/test_optiga_backend.c");
         }
 
         Ok(())

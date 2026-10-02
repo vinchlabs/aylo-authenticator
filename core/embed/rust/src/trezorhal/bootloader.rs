@@ -19,7 +19,7 @@ pub enum BootloaderWFResult {
 
 pub fn bootloader_process_usb() -> BootloaderWFResult {
     unsafe {
-        BootloaderWFResult::from_u32(ffi::bootloader_process_usb())
+        BootloaderWFResult::from_u32(ffi::bootloader_process_usb(core::ptr::null_mut()))
             .unwrap_or(BootloaderWFResult::Error)
     }
 }

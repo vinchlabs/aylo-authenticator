@@ -9,7 +9,7 @@
 // Allowing dead code not to cause a lot of warnings when building for a specific target
 // (when building for TR, a lot of code only used in TT would get marked as unused).
 #![allow(dead_code)]
-#![feature(const_trait_impl)]
+#![cfg_attr(not(feature = "authenticator"), feature(const_trait_impl))]
 #![feature(custom_test_frameworks)]
 #![no_main]
 #![reexport_test_harness_main = "test_main"]
@@ -23,6 +23,12 @@
 )]
 #![cfg_attr(feature = "layout_bolt", feature(trait_alias))]
 
+// num_derive's derives are consumed by trezorhal modules and UI code that the
+// dedicated authenticator does not build: storage (gone with ordinary storage,
+// whose areas are now vault replicas), button, haptic, jpegdec, bootloader, and
+// every layout. The deny stays in force for every other project; only there is
+// the import allowed to go unused.
+#[cfg_attr(feature = "authenticator", allow(unused_imports))]
 #[macro_use]
 extern crate num_derive;
 
@@ -57,6 +63,7 @@ mod ward;
 // mod ui is `pub` because of the re-export pattern in individual models, which
 // would trigger a brickload of "unused symbol" warnings otherwise.
 // TODO: maybe get rid of the re-export pattern :shrugs:
+#[cfg(not(feature = "authenticator"))]
 pub mod ui;
 
 pub mod util;

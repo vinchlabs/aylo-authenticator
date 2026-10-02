@@ -79,7 +79,7 @@ workflow_result_t workflow_menu(const fw_check_info_t* fw, protob_ios_t* ios) {
     }
     if (menu_result == MENU_WIPE) {  // wipe
       workflow_ifaces_pause(ios);
-      workflow_result_t r = workflow_wipe_device(NULL);
+      workflow_result_t r = workflow_wipe_device(NULL, NULL);
       if (r == WF_CANCELLED) {
         workflow_ifaces_resume(ios);
       }

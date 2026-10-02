@@ -61,6 +61,8 @@ secbool recv_msg_ping(protob_io_t *iface, Ping *msg);
 
 secbool recv_msg_firmware_erase(protob_io_t *iface, FirmwareErase *msg);
 
+secbool recv_msg_unlock_bootloader(protob_io_t *iface, UnlockBootloader *msg);
+
 secbool recv_msg_firmware_upload(protob_io_t *iface, FirmwareUpload *msg,
                                  void *ctx,
                                  void (*data_cb)(size_t len, void *ctx),

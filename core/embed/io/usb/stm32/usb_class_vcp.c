@@ -236,8 +236,8 @@ secbool usb_vcp_add(const usb_vcp_info_t *info) {
   d->fheader.bFunctionLength = sizeof(usb_vcp_header_descriptor_t);
   d->fheader.bDescriptorType = USB_DESC_TYPE_CS_INTERACE;
   d->fheader.bDescriptorSubtype = USB_DESC_TYPE_HEADER;
-  d->fheader.bcdCDC = 0x1001;  // USB Class Definitions for Communication
-                               // Devices Specification release number.
+  d->fheader.bcdCDC = 0x0110;  // USB Class Definitions for Communication
+                               // Devices Specification release 1.10.
 
   // Call Management Functional Descriptor
   d->fcm.bFunctionLength = sizeof(usb_vcp_cm_descriptor_t);

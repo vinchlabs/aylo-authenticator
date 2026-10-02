@@ -169,13 +169,13 @@ debuglink_result_t debuglink_process(void) {
   if (protob_get_msg_header(&g_debug_io, &msg_id) == sectrue) {
     switch (msg_id) {
       case MessageType_MessageType_Initialize:
-        workflow_initialize(&g_debug_io, &fw);
+        workflow_initialize(&g_debug_io, &fw, NULL);
         break;
       case MessageType_MessageType_GetFeatures:
-        workflow_get_features(&g_debug_io, &fw);
+        workflow_get_features(&g_debug_io, &fw, NULL);
         break;
       case MessageType_MessageType_Ping:
-        workflow_ping(&g_debug_io);
+        workflow_ping(&g_debug_io, NULL);
         break;
       case MessageType_MessageType_DebugLinkGetState:
         debuglink_process_get_state(&g_debug_io);

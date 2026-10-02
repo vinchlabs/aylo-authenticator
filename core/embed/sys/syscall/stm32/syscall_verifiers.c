@@ -32,6 +32,7 @@
 #ifdef KERNEL
 
 // Checks if bitblt destination is accessible
+#ifndef AUTHENTICATOR
 #define CHECK_BB_DST(_bb)                                               \
   if (!probe_write_access((_bb)->dst_row, (size_t)(_bb)->dst_stride *   \
                                               (size_t)(_bb)->height)) { \
@@ -56,6 +57,7 @@ _Static_assert(sizeof(((gfx_bitblt_t *)0)->dst_stride) +
                            sizeof(((gfx_bitblt_t *)0)->height) <=
                        sizeof(size_t),
                "bitblt dimensions may overflow the probe length");
+#endif
 
 // ---------------------------------------------------------------------
 
@@ -389,7 +391,7 @@ access_violation:
 
 // ---------------------------------------------------------------------
 
-#ifdef FRAMEBUFFER
+#if defined(FRAMEBUFFER) && !defined(AUTHENTICATOR)
 
 bool display_get_frame_buffer__verified(display_fb_info_t *fb) {
   if (!probe_write_access(fb, sizeof(*fb))) {
@@ -411,6 +413,7 @@ access_violation:
 
 #endif  // FRAMEBUFFER
 
+#ifndef AUTHENTICATOR
 void display_fill__verified(const gfx_bitblt_t *bb) {
   if (!probe_read_access(bb, sizeof(*bb))) {
     goto access_violation;
@@ -441,6 +444,7 @@ void display_copy_rgb565__verified(const gfx_bitblt_t *bb) {
 access_violation:
   apptask_access_violation();
 }
+#endif
 
 // ---------------------------------------------------------------------
 
@@ -702,6 +706,10 @@ access_violation:
 
 // ---------------------------------------------------------------------
 
+// Excluded from the authenticator: ordinary storage writes STORAGE_AREAS[0] and
+// STORAGE_AREAS[1], which are vault replicas 0 and 1 there. Verifying a pointer
+// is not the issue -- the call itself is, so there is nothing to verify.
+#ifndef AUTHENTICATOR
 static PIN_UI_WAIT_CALLBACK storage_callback = NULL;
 
 static secbool storage_callback_wrapper(uint32_t wait, uint32_t progress,
@@ -850,6 +858,7 @@ access_violation:
   apptask_access_violation();
   return secfalse;
 }
+#endif  // AUTHENTICATOR
 
 // ---------------------------------------------------------------------
 
@@ -879,6 +888,7 @@ access_violation:
 
 // ---------------------------------------------------------------------
 
+#ifndef AUTHENTICATOR
 bool translations_write__verified(const uint8_t *data, uint32_t offset,
                                   uint32_t len) {
   if (!probe_read_access(data, len)) {
@@ -903,6 +913,7 @@ access_violation:
   apptask_access_violation();
   return NULL;
 }
+#endif  // AUTHENTICATOR
 
 // ---------------------------------------------------------------------
 

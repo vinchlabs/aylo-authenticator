@@ -4,6 +4,21 @@
 #![reexport_test_harness_main = "test_main"]
 
 #[cfg(test)]
+#[test]
+fn native_authenticator() {
+    unsafe extern "C" {
+        safe fn test_authenticator();
+        safe fn test_authenticator_crypto();
+        safe fn test_authenticator_call();
+        safe fn test_optiga_backend();
+    }
+    test_authenticator();
+    test_authenticator_crypto();
+    test_authenticator_call();
+    test_optiga_backend();
+}
+
+#[cfg(test)]
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     unsafe extern "C" {

@@ -45,9 +45,10 @@ models.workspace = true
 rtl.workspace = true
 sec.workspace = true
 sys.workspace = true
-upymod = { workspace = true, optional = true }
+upymod = { workspace = true, optional = true, default-features = false }
 
 [features]
+authenticator = []
 
 # --------------------------------------------------------------------------
 # Selectable components
@@ -172,4 +173,3 @@ default = []
 emulator = ["io/emulator", "upymod?/emulator"]
 mcu_stm32f429 = ["mcu_stm32f4"]
 mcu_stm32f4 = []
-

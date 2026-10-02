@@ -20,7 +20,9 @@
 #include <trezor_model.h>
 #include <trezor_types.h>
 
+#if defined(USE_TOUCH) || defined(USE_BUTTON)
 #include <io/display.h>
+#endif
 #include <sys/sysevent.h>
 #include <sys/systick.h>
 

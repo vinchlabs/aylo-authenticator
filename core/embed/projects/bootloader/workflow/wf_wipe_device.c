@@ -83,10 +83,20 @@ bool wipe_bonds(protob_io_t* iface) {
 }
 #endif
 
-workflow_result_t workflow_wipe_device(protob_io_t* iface) {
+workflow_result_t workflow_wipe_device(protob_io_t* iface,
+                                       bool* request_decoded) {
+  if (request_decoded != NULL) {
+    *request_decoded = false;
+  }
+
   WipeDevice msg_recv;
   if (iface != NULL) {
-    recv_msg_wipe_device(iface, &msg_recv);
+    if (sectrue != recv_msg_wipe_device(iface, &msg_recv)) {
+      return WF_ERROR;
+    }
+    if (request_decoded != NULL) {
+      *request_decoded = true;
+    }
   }
 
 #ifdef USE_RGB_LED

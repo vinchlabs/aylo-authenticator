@@ -102,6 +102,7 @@ bool boot_image_check__verified(const boot_image_t *image);
 void boot_image_replace__verified(const boot_image_t *image);
 
 // ---------------------------------------------------------------------
+#ifndef AUTHENTICATOR
 #include <io/display.h>
 
 #ifdef FRAMEBUFFER
@@ -111,6 +112,7 @@ bool display_get_frame_buffer__verified(display_fb_info_t *fb);
 void display_fill__verified(const gfx_bitblt_t *bb);
 
 void display_copy_rgb565__verified(const gfx_bitblt_t *bb);
+#endif
 
 // ---------------------------------------------------------------------
 #include <io/usb.h>
@@ -190,6 +192,10 @@ bool telemetry_get__verified(telemetry_data_t *out);
 #endif
 
 // ---------------------------------------------------------------------
+// Declared only where ordinary storage is linked. On the authenticator its two
+// areas are vault replicas 0 and 1, so the subsystem is absent and these
+// declarations would resolve to nothing.
+#ifndef AUTHENTICATOR
 #include <sec/storage.h>
 
 void storage_setup__verified(PIN_UI_WAIT_CALLBACK callback);
@@ -215,6 +221,7 @@ secbool storage_set__verified(const uint16_t key, const void *val,
                               const uint16_t len);
 
 secbool storage_next_counter__verified(const uint16_t key, uint32_t *count);
+#endif  // AUTHENTICATOR
 
 // ---------------------------------------------------------------------
 #include <sec/rng_strong.h>
@@ -224,12 +231,14 @@ void rng_fill_buffer__verified(void *buffer, size_t buffer_size);
 void rng_fill_buffer_strong__verified(void *buffer, size_t buffer_size);
 
 // ---------------------------------------------------------------------
+#ifndef AUTHENTICATOR
 #include <io/translations.h>
 
 bool translations_write__verified(const uint8_t *data, uint32_t offset,
                                   uint32_t len);
 
 const uint8_t *translations_read__verified(uint32_t *len, uint32_t offset);
+#endif  // AUTHENTICATOR
 
 // ---------------------------------------------------------------------
 #include <sec/fwutils.h>

@@ -6,6 +6,10 @@ fn main() -> Result<()> {
     xbuild::build(|lib| {
         lib.import_lib("io")?;
 
+        if cfg!(feature = "authenticator") {
+            lib.add_define("AUTHENTICATOR", Some("1"));
+        }
+
         generate_trezorhal_bindings(lib)?;
 
         if cfg!(feature = "micropython") {

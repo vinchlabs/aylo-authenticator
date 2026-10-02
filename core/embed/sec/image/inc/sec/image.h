@@ -100,6 +100,20 @@ typedef enum {
   VENDOR_FW_TYPE_PRODTEST = 4,
   // Trezor CA firmware
   VENDOR_FW_TYPE_CA = 5,
+  // The headless FIDO2 authenticator. Allocated so that something authenticated says
+  // what an image is: the vendor header is signature-checked before anything is
+  // committed, so a bootloader that compares this value is comparing a fact rather
+  // than a hint. That, and nothing more, is what this value buys on T3T1.
+  //
+  // In particular it does NOT separate storage on this model. fw_type reaches the
+  // storage salt only through secret_key_storage_salt(), and
+  // sec/storage/stm32u5/storage_salt.c calls that only under
+  // SECRET_PRIVILEGED_MASTER_KEY_SLOT, which models/T3T1/secret_layout.h does not
+  // define -- T3T1 has a single key slot, used by Optiga. T3T1 therefore takes the
+  // legacy branch, where the salt is CPUID plus the OTP randomness block and is the
+  // same for every firmware type. Confirmed on hardware: moving a device from
+  // fw_type 0 to 6 left its PIN and all of its discoverable credentials readable.
+  VENDOR_FW_TYPE_AUTHENTICATOR = 6,
 } vendor_fw_type_t;
 
 typedef struct {

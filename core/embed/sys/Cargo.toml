@@ -41,6 +41,14 @@ secure_mode = ["models/secure_mode"]
 
 app_loading = ["applets"]
 applets = []
+# Compiles the authenticator's replica areas out of the applet's view. The MPU's
+# application mode maps ASSETS_START read-only-unprivileged so that a UI applet
+# can dereference the translation pointers the kernel hands it. This project has
+# no display and no translations -- the syscalls are not even built -- while
+# ASSETS holds the third vault replica, so that mapping is pure residue and it
+# would let unprivileged code read the credential inventory without the
+# PIN-authorized session every sanctioned read requires.
+authenticator_vault_areas = []
 block_on_vcp = []
 boot_ucb = []
 dbg_console = []

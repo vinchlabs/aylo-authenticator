@@ -20,9 +20,11 @@
 #include <trezor_model.h>
 #include <trezor_rtl.h>
 
+#ifndef AUTHENTICATOR
 #include <io/display.h>
 #include <io/gfx_bitblt.h>
 #include <io/rsod.h>
+#endif
 #include <sec/board_capabilities.h>
 #include <sec/boot_image.h>
 #include <sec/monoctr.h>
@@ -170,10 +172,12 @@ void drivers_init() {
   pvd_init();
 #endif
 
+#ifndef AUTHENTICATOR
   display_init(DISPLAY_JUMP_BEHAVIOR);
 
 #ifdef USE_TRUSTZONE
   display_set_unpriv_access(true);
+#endif
 #endif
 
 #ifdef SECURE_MODE
@@ -257,7 +261,7 @@ static void kernel_loop(applet_t *coreapp) {
   } while (applet_is_alive(coreapp));
 }
 
-#ifndef USE_BOOTARGS_RSOD
+#if !defined(USE_BOOTARGS_RSOD) && !defined(AUTHENTICATOR)
 
 // Shows RSOD (Red Screen of Death)
 static void show_rsod(const systask_postmortem_t *pminfo) {
@@ -306,13 +310,23 @@ static void init_and_show_rsod(const systask_postmortem_t *pminfo) {
 static void kernel_panic(const systask_postmortem_t *pminfo) {
   // Since the system state is unreliable, enter emergency mode
   // and show the RSOD.
-#ifndef USE_BOOTARGS_RSOD
+#ifdef AUTHENTICATOR
+  reboot_or_halt_after_rsod();
+#elif !defined(USE_BOOTARGS_RSOD)
   system_emergency_rescue(&init_and_show_rsod, pminfo);
 #else
   reboot_with_rsod(pminfo);
 #endif  // USE_BOOTARGS_RSOD
   // We never get here
 }
+
+#ifdef AUTHENTICATOR
+// The tamper interrupt must never attempt to render an RSOD on a headless unit.
+void rsod_panic_handler(const systask_postmortem_t *pminfo) {
+  (void)pminfo;
+  reboot_or_halt_after_rsod();
+}
+#endif
 
 int main(void) {
 #if defined(USE_TRUSTZONE) && defined(SECURE_MODE)
@@ -341,7 +355,9 @@ int main(void) {
   // Release the coreapp resources
   applet_unload(&coreapp);
 
-#ifndef USE_BOOTARGS_RSOD
+#ifdef AUTHENTICATOR
+  reboot_or_halt_after_rsod();
+#elif !defined(USE_BOOTARGS_RSOD)
   // Coreapp crashed, show RSOD
   show_rsod(&coreapp.task.pminfo);
   // Reboots or halts (if RSOD_INFINITE_LOOP is defined)

@@ -34,6 +34,17 @@
  */
 void norcow_init(uint32_t *norcow_version);
 
+#ifdef USE_AUTH_VAULT
+// Secure authenticator-only mount: no erase, recovery, upgrade or PIN setup.
+// create may program a header only if every byte of every area is erased.
+typedef enum {
+  NORCOW_AUTH_ERROR,
+  NORCOW_AUTH_BLANK,
+  NORCOW_AUTH_READY
+} norcow_auth_state;
+norcow_auth_state norcow_auth_open(secbool create);
+#endif
+
 /*
  * Wipe the storage
  */

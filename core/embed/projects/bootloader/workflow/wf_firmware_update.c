@@ -28,6 +28,7 @@
 #include <sys/systick.h>
 
 #if defined(LOCKABLE_BOOTLOADER) || USE_STORAGE_HWKEY
+#include <sec/monoctr.h>
 #include <sec/secret.h>
 #endif
 
@@ -35,6 +36,7 @@
 #include <sec/backup_ram.h>
 #endif
 
+#include "authenticator_update_policy.h"
 #include "bootui.h"
 #include "protob/protob.h"
 #include "version_check.h"
@@ -185,6 +187,44 @@ static upload_status_t fw_on_headers(image_upload_handler_t *base,
                      "Firmware downgrade protection");
     return UPLOAD_ERR_INVALID_IMAGE_HEADER_VERSION;
   }
+
+#if defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION
+  // This device accepts only its own firmware. Everything above has established that
+  // the image is signed, for this model, and not older than the counter -- but the
+  // authenticator inherits the model's firmware monotonic version, so a correctly
+  // signed ordinary Trezor image for this hardware satisfies every one of those and
+  // would be installed. The vendor header's fw_type is what tells them apart, and it
+  // is authentic because check_vendor_header_keys verified the header that carries it.
+  {
+    uint8_t stored_monotonic = 0;
+    // A counter that cannot be read is reported as out of range rather than as zero,
+    // which would make every image look like an upgrade.
+    if (sectrue != monoctr_read(MONOCTR_FIRMWARE_VERSION, &stored_monotonic)) {
+      stored_monotonic = AUTHENTICATOR_MONOTONIC_MAX + 1;
+    }
+    const authenticator_image_facts_t facts = {
+        // True by construction here: the three checks above all passed.
+        .signature_valid = true,
+        .model_matches = true,
+        .product_is_authenticator =
+            (vhdr.fw_type == VENDOR_FW_TYPE_AUTHENTICATOR),
+        .image_monotonic = received_hdr->monotonic,
+        .stored_monotonic = stored_monotonic,
+    };
+    // Authorization is not yet sourceable -- see the comment on this change -- so the
+    // branch that skips it is taken, which is what this bootloader already does. Every
+    // other rule still applies.
+    const authenticator_update_verdict_t verdict =
+        authenticator_update_check(&facts, true, false);
+    if (verdict != AUTHENTICATOR_UPDATE_ALLOWED) {
+      send_msg_failure(iface, FailureType_Failure_ProcessError,
+                       verdict == AUTHENTICATOR_UPDATE_WRONG_PRODUCT
+                           ? "Not an authenticator image"
+                           : "Authenticator update policy");
+      return UPLOAD_ERR_INVALID_IMAGE_HEADER_VERSION;
+    }
+  }
+#endif
 
 #ifdef USE_SECMON_VERIFICATION
   size_t secmon_start_offset =
@@ -435,12 +475,19 @@ static void fw_ui_success(bool wireless) {
 }
 
 static void fw_ui_fail(upload_status_t status) {
+#if defined(TS5_HEADLESS_DEV) && defined(TREZOR_MODEL_T3T1) && !PRODUCTION
+  (void)status;
+  // The protocol has already returned a failure to the host. There is no
+  // display on this development board, so do not enter a screen workflow.
+  return;
+#else
   if (status == UPLOAD_ERR_BOOTLOADER_LOCKED) {
     // This function does not return
     show_install_restricted_screen();
   } else {
     ui_screen_fail();
   }
+#endif
 }
 
 static const image_upload_ui_t fw_upload_ui = {
@@ -449,10 +496,18 @@ static const image_upload_ui_t fw_upload_ui = {
     .fail = fw_ui_fail,
 };
 
-workflow_result_t workflow_firmware_update(protob_io_t *iface) {
+workflow_result_t workflow_firmware_update(protob_io_t *iface,
+                                           bool *request_decoded) {
+  if (request_decoded != NULL) {
+    *request_decoded = false;
+  }
+
   FirmwareErase msg;
   if (sectrue != recv_msg_firmware_erase(iface, &msg)) {
     return WF_ERROR;
+  }
+  if (request_decoded != NULL) {
+    *request_decoded = true;
   }
 
   fw_upload_handler_t handler = {

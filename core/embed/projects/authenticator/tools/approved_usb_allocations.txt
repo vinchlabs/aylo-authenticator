@@ -1,0 +1,3 @@
+# Reviewed production USB allocations, one 0xVID 0xPID pair per line.
+# Intentionally empty: no production authenticator allocation has been approved.
+# A release requires a reviewed commit adding an allocated pair here.
