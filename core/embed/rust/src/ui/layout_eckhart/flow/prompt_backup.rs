@@ -1,0 +1,111 @@
+use super::super::component::Button;
+use super::super::firmware::{
+    ActionBar, Header, Hint, ShortMenuVec, TextScreen, TextScreenMsg, VerticalMenu,
+    VerticalMenuScreen, VerticalMenuScreenMsg,
+};
+use super::super::theme::gradient::Gradient;
+use super::super::theme::{self};
+use crate::micropython::Error;
+use crate::strutil::TString;
+use crate::translations::TR;
+use crate::ui::component::text::paragraphs::{Paragraph, ParagraphSource, Paragraphs};
+use crate::ui::component::ComponentExt;
+use crate::ui::flow::base::{Decision, DecisionBuilder as _};
+use crate::ui::flow::{FlowController, FlowMsg, SwipeFlow};
+use crate::ui::geometry::{Direction, LinearPlacement};
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum PromptBackup {
+    Intro,
+    Menu,
+    SkipBackup,
+}
+
+impl FlowController for PromptBackup {
+    #[inline]
+    fn index(&'static self) -> usize {
+        *self as usize
+    }
+
+    fn handle_swipe(&'static self, _direction: Direction) -> Decision {
+        self.do_nothing()
+    }
+
+    fn handle_event(&'static self, msg: FlowMsg) -> Decision {
+        match (self, msg) {
+            (Self::Intro, FlowMsg::Info) => Self::Menu.goto(),
+            (Self::Intro, FlowMsg::Confirmed) => self.return_msg(FlowMsg::Confirmed),
+            (Self::Menu, FlowMsg::Choice(0)) => Self::SkipBackup.swipe_left(),
+            (Self::Menu, FlowMsg::Cancelled) => Self::Intro.goto(),
+            (Self::SkipBackup, FlowMsg::Cancelled) => Self::Intro.goto(),
+            (Self::SkipBackup, FlowMsg::Confirmed) => self.return_msg(FlowMsg::Cancelled),
+            _ => self.do_nothing(),
+        }
+    }
+}
+
+pub fn new_prompt_backup() -> Result<SwipeFlow, Error> {
+    let title: TString = TR::backup__title_create_wallet_backup.into();
+    let content: TString = TR::backup__it_should_be_backed_up.into();
+
+    let paragraphs = Paragraphs::new(Paragraph::new(&theme::TEXT_REGULAR, content))
+        .with_placement(LinearPlacement::vertical());
+
+    let content_intro = TextScreen::new(paragraphs)
+        .with_header(Header::new(title).with_menu_button())
+        .with_action_bar(ActionBar::new_single(Button::with_text(
+            TR::buttons__continue.into(),
+        )))
+        .with_page_limit(1)
+        .map(|msg| match msg {
+            TextScreenMsg::Menu => Some(FlowMsg::Info),
+            TextScreenMsg::Confirmed => Some(FlowMsg::Confirmed),
+            _ => None,
+        });
+
+    let content_menu = VerticalMenuScreen::new(VerticalMenu::<ShortMenuVec>::empty().with_item(
+        Button::new_menu_item(
+            TR::backup__title_skip.into(),
+            theme::menu_item_title_orange(),
+        ),
+    ))
+    .with_header(Header::new(title).with_close_button())
+    .map(|msg| match msg {
+        VerticalMenuScreenMsg::Selected(i) => Some(FlowMsg::Choice(i)),
+        VerticalMenuScreenMsg::Close => Some(FlowMsg::Cancelled),
+        _ => None,
+    });
+
+    let paragraphs_skip_intro = Paragraph::new(
+        &theme::TEXT_REGULAR,
+        TR::backup__create_backup_to_prevent_loss,
+    )
+    .into_paragraphs()
+    .with_placement(LinearPlacement::vertical());
+
+    let content_skip_intro = TextScreen::new(paragraphs_skip_intro)
+        .with_header(
+            Header::new(TR::words__important.into())
+                .with_icon(theme::ICON_WARNING, theme::ORANGE)
+                .with_text_style(theme::label_title_danger()),
+        )
+        .with_action_bar(ActionBar::new_double(
+            Button::with_icon(theme::ICON_CHEVRON_LEFT),
+            Button::with_text(TR::buttons__skip.into())
+                .styled(theme::button_actionbar_danger())
+                .with_gradient(Gradient::Alert),
+        ))
+        .with_hint(Hint::new_instruction(TR::backup__not_recommend, None))
+        .with_page_limit(1)
+        .map(|msg| match msg {
+            TextScreenMsg::Menu => Some(FlowMsg::Cancelled),
+            TextScreenMsg::Confirmed => Some(FlowMsg::Confirmed),
+            TextScreenMsg::Cancelled => Some(FlowMsg::Cancelled),
+        });
+
+    let mut res = SwipeFlow::new(&PromptBackup::Intro);
+    res.add_page(&PromptBackup::Intro, content_intro)?
+        .add_page(&PromptBackup::Menu, content_menu)?
+        .add_page(&PromptBackup::SkipBackup, content_skip_intro)?;
+    Ok(res)
+}

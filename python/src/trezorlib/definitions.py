@@ -1,0 +1,211 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import logging
+import tarfile
+import typing as t
+from pathlib import Path
+
+import construct as c
+import requests
+from construct_classes import Struct, subcon
+
+from . import cosi, merkle_tree
+from .construct_helpers import EnumAdapter
+from .messages import DefinitionType
+
+LOG = logging.getLogger(__name__)
+
+MAGIC = b"trzd"
+DEFS_BASE_URL = "https://data.trezor.io/firmware/definitions/"
+
+DEFINITIONS_DEV_SIGS_REQUIRED = 1
+DEFINITIONS_DEV_PUBLIC_KEYS = [
+    bytes.fromhex(key)
+    for key in ("db995fe25169d141cab9bbba92baa01f9f2e1ece7df4cb2ac05190f37fcc1f9d",)
+]
+
+# Number of CoSi signatures required by definition format version.
+# Version 1 requires 2 signatures.
+# Version 2 requires 1 signature.
+DEFINITIONS_SIGS_REQUIRED = {
+    b"1": 2,
+    b"2": 1,
+}
+DEFINITIONS_PUBLIC_KEYS = [
+    bytes.fromhex(key)
+    for key in (
+        "4334996343623e462f0fc93311fef1484ca23d2ff1eec6df1fa8eb7e3573b3db",
+        "a9a22cc265a0cb1d6cb329bc0e60bc45df76b9ab28fb87b61136feaf8d8fdc96",
+        "b8d2b21de27124f0511f903ae7e60e07961810a0b8f28ea755fa50367a8a2b8b",
+    )
+]
+
+
+ProofFormat = c.PrefixedArray(c.Int8ul, c.Bytes(32))
+
+
+class DefinitionPayload(Struct):
+    magic: bytes
+    version: bytes  # ASCII digit byte of the format version, e.g. b"1"
+    data_type: DefinitionType
+    timestamp: int
+    data: bytes
+
+    SUBCON = c.Struct(
+        "magic" / c.Const(MAGIC),
+        "version" / c.Bytes(1),
+        "data_type" / EnumAdapter(c.Int8ul, DefinitionType),
+        "timestamp" / c.Int32ul,
+        "data" / c.Prefixed(c.Int16ul, c.GreedyBytes),
+    )
+
+
+class Definition(Struct):
+    payload: DefinitionPayload = subcon(DefinitionPayload)
+    proof: list[bytes]
+    sigmask: int
+    signature: bytes
+
+    SUBCON = c.Struct(
+        "payload" / DefinitionPayload.SUBCON,
+        "proof" / ProofFormat,
+        "sigmask" / c.Int8ul,
+        "signature" / c.Bytes(64),
+    )
+
+    def verify(self, dev: bool = False) -> None:
+        payload = self.payload.build()
+        root = merkle_tree.evaluate_proof(payload, self.proof)
+        if dev:
+            sigs_required, public_keys = (
+                DEFINITIONS_DEV_SIGS_REQUIRED,
+                DEFINITIONS_DEV_PUBLIC_KEYS,
+            )
+        else:
+            try:
+                sigs_required = DEFINITIONS_SIGS_REQUIRED[self.payload.version]
+            except KeyError:
+                raise ValueError(
+                    f"Unsupported definition format version {self.payload.version.decode()!r}"
+                ) from None
+            public_keys = DEFINITIONS_PUBLIC_KEYS
+        cosi.verify(
+            self.signature,
+            root,
+            sigs_required,
+            public_keys,
+            self.sigmask,
+        )
+
+
+def _normalize_eth_address(address: t.AnyStr) -> str:
+    if isinstance(address, bytes):
+        address_str = address.hex()
+    elif address.startswith("0x"):
+        address_str = address[2:]
+    else:
+        address_str = address
+
+    return address_str.lower()
+
+
+class Source:
+    def fetch_path(self, *components: str) -> t.Optional[bytes]:
+        raise NotImplementedError
+
+    def get_eth_network_by_slip44(self, slip44: int) -> t.Optional[bytes]:
+        return self.fetch_path("eth", "slip44", str(slip44), "network.dat")
+
+    def get_eth_network(self, chain_id: int) -> t.Optional[bytes]:
+        return self.fetch_path("eth", "chain-id", str(chain_id), "network.dat")
+
+    def get_eth_token(self, chain_id: int, address: t.AnyStr) -> t.Optional[bytes]:
+        address_str = _normalize_eth_address(address)
+
+        return self.fetch_path(
+            "eth", "chain-id", f"{chain_id}", f"token-{address_str}.dat"
+        )
+
+    def get_eth_display_format(
+        self, chain_id: int, address: t.AnyStr, func_sig: bytes
+    ) -> t.Optional[bytes]:
+        """Fetch an ERC-7730 clear-signing contract descriptor (display format).
+
+        Descriptors are keyed by the contract address and the 4-byte function
+        selector (`func_sig`) of the call, e.g.
+        ``eth/chain-id/1/display-format/<address>-<func_sig>.dat``.
+        """
+        address_str = _normalize_eth_address(address)
+        func_sig_str = func_sig.hex().lower()
+
+        return self.fetch_path(
+            "eth",
+            "chain-id",
+            f"{chain_id}",
+            "display-format",
+            f"{address_str}-{func_sig_str}.dat",
+        )
+
+    def get_solana_token(self, mint_account: str) -> t.Optional[bytes]:
+        return self.fetch_path("solana", "token", f"{mint_account}.dat")
+
+
+class NullSource(Source):
+    def fetch_path(self, *components: str) -> t.Optional[bytes]:
+        return None
+
+
+class FilesystemSource(Source):
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def fetch_path(self, *components: str) -> t.Optional[bytes]:
+        path = self.root.joinpath(*components)
+        if not path.exists():
+            LOG.info("Requested definition at %s was not found", path)
+            return None
+        LOG.info("Reading definition from %s", path)
+        return path.read_bytes()
+
+
+class UrlSource(Source):
+    def __init__(self, base_url: str = DEFS_BASE_URL) -> None:
+        self.base_url = base_url
+
+    def fetch_path(self, *components: str) -> t.Optional[bytes]:
+        url = self.base_url + "/".join(components)
+        LOG.info("Downloading definition from %s", url)
+        r = requests.get(url)
+        if r.status_code == 404:
+            LOG.info("Requested definition at %s was not found", url)
+            return None
+        r.raise_for_status()
+        return r.content
+
+
+class TarSource(Source):
+    def __init__(self, path: Path) -> None:
+        self.archive = tarfile.open(path)
+
+    def fetch_path(self, *components: str) -> t.Optional[bytes]:
+        inner_name = "/".join(components)
+        LOG.info("Extracting definition from %s:%s", self.archive.name, inner_name)
+        try:
+            return self.archive.extractfile(inner_name).read()  # type: ignore [not a known attribute]
+        except Exception:
+            LOG.info("Requested definition at %s was not found", inner_name)
+            return None

@@ -1,0 +1,59 @@
+name: 'Build core emulator'
+description: 'Build, upload to S3, and store core emulator artifact'
+inputs:
+  model:
+    description: 'Trezor model'
+    required: true
+  version:
+    description: 'Version string'
+    required: true
+  artifact-name:
+    description: 'Artifact name'
+    required: true
+  binary-suffix:
+    description: 'Binary suffix appended to version, e.g. -arm'
+    required: false
+    default: ''
+  build-bootloader:
+    description: 'Build bootloader before unix emulator build'
+    required: false
+    default: 'false'
+runs:
+  using: 'composite'
+  steps:
+    - uses: ./.github/actions/environment
+
+    - run: nix-shell --run "uv run make -C core build_bootloader_emu TREZOR_MODEL=${{ inputs.model }}"
+      if: inputs.build-bootloader == 'true'
+      shell: sh
+
+    - run: nix-shell --run "uv run make -C core build_unix_frozen TREZOR_MODEL=${{ inputs.model }}"
+      shell: sh
+
+    - id: prepare_binary
+      run: |
+        TARGET="core/build-xtask/artifacts/latest/trezor-emu-core-${{ inputs.model }}-v${{ inputs.version }}${{ inputs.binary-suffix }}"
+        mv core/build-xtask/artifacts/latest/firmware-emu "$TARGET"
+        echo "binary_path=$TARGET" >> "$GITHUB_OUTPUT"
+      shell: sh
+
+    - name: Configure aws credentials
+      if: github.repository == 'trezor/trezor-firmware'
+      uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7  # aws-actions/configure-aws-credentials@v6.0.0
+      with:
+        role-to-assume: arn:aws:iam::538326561891:role/gh_actions_deploy_dev_firmware_data
+        aws-region: eu-west-1
+
+    - name: Upload emulator binaries
+      if: github.repository == 'trezor/trezor-firmware'
+      run: |
+        aws s3 cp "${{ steps.prepare_binary.outputs.binary_path }}" "s3://data.trezor.io/dev/firmware/releases/emulators-new/${{ inputs.model }}/"
+      shell: sh
+
+    - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          core/build-xtask/artifacts/latest/trezor-emu-core*
+          core/build-xtask/artifacts/latest/bootloader-emu
+        retention-days: 7

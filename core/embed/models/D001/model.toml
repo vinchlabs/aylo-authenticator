@@ -1,0 +1,11 @@
+mcu = "stm32f429"
+default_board = "disc1"
+
+features = [
+    "dma2d",
+    "pvd",
+    "framebuffer",
+    "secure_mode",
+    "layout_bolt",
+    "display_rgb565",
+]

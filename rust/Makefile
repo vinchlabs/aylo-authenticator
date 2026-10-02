@@ -1,0 +1,42 @@
+# trezor-client needs running emulator for test, handled in core.yml
+CRATES_TEST = trezor-thp trezor-tjpgdec trezor-ward
+CRATES = ${CRATES_TEST} trezor-client
+
+.PHONY: check audit
+
+check: clippy test audit
+
+style:
+	@for D in $(CRATES); do ( \
+		echo "[STYLE $$D]"; \
+		cd $$D; \
+		cargo fmt \
+	); done
+
+style_check:
+	@set -e; for D in $(CRATES); do ( \
+		echo "[STYLE_CHECK $$D]"; \
+		cd $$D; \
+		cargo fmt -- --check \
+	); done
+
+clippy:
+	@set -e; for D in $(CRATES); do ( \
+		echo "[CLIPPY $$D]"; \
+		cd $$D; \
+		cargo clippy \
+	); done
+
+test:
+	@set -e; for D in $(CRATES_TEST); do ( \
+		echo "[TEST $$D]"; \
+		cd $$D; \
+		cargo test \
+	); done
+
+audit:
+	@set -e; for D in $(CRATES); do ( \
+		echo "[AUDIT $$D]"; \
+		cd $$D; \
+		cargo audit --deny warnings \
+	); done

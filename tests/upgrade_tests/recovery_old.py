@@ -1,0 +1,77 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+from typing import TYPE_CHECKING
+
+from ..recovery_helpers import layout_has_keyboard, navigate_to_keyboard
+
+if TYPE_CHECKING:
+    from trezorlib.debuglink import DebugLink, LayoutContent
+
+
+def _enter_word(debug: "DebugLink", word: str, is_slip39: bool = False) -> None:
+    typed_word = word[:4]
+    for coords in debug.button_actions.type_word(typed_word, is_slip39=is_slip39):
+        debug.click(coords, wait=False)
+
+    debug.click(debug.screen_buttons.mnemonic_confirm(), wait=False)
+
+
+def confirm_recovery(debug: "DebugLink") -> None:
+    debug.click(debug.screen_buttons.ok())
+
+
+def select_number_of_words(
+    debug: "DebugLink", tag_version: tuple | None, num_of_words: int = 20
+) -> None:
+    if "SelectWordCount" not in debug.read_layout().all_components():
+        debug.click(debug.screen_buttons.ok())
+    if tag_version is None or tag_version > (2, 8, 8):
+        # layout changed after adding the cancel button
+        coords = debug.screen_buttons.word_count_all_word(num_of_words)
+    else:
+        word_option_offset = 6
+        word_options = (12, 18, 20, 24, 33)
+        index = word_option_offset + word_options.index(
+            num_of_words
+        )  # raises if num of words is invalid
+        coords = debug.screen_buttons.grid34(index % 3, index // 3)
+    debug.click(coords)
+
+
+def enter_share(debug: "DebugLink", share: str) -> "LayoutContent":
+    layout = navigate_to_keyboard(debug)
+
+    # Fast entry of all 20 words
+    for word in share.split(" "):
+        _enter_word(debug, word, is_slip39=True)
+
+    # After all words entered, poll for recovery status to appear
+    import time
+
+    if (2, 4, 2) <= debug.version < (2, 5, 3):
+        # https://github.com/trezor/trezor-firmware/pull/1725 may crash the emulator.
+        # See https://github.com/trezor/trezor-firmware/issues/7052 for more details.
+        # As a workaround, wait a bit until the last ButtonRequest is sent and ACKed.
+        time.sleep(1)
+
+    for _ in range(10):  # max 1 second total
+        time.sleep(0.1)
+        layout = debug.read_layout()
+        if not layout_has_keyboard(layout):
+            break
+
+    return layout

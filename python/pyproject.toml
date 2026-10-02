@@ -1,0 +1,105 @@
+[project]
+name = "trezor"
+version = "0.20.3"
+description = "Python library for communicating with Trezor Hardware Wallet"
+readme = "README.md"
+license = "LGPL-3.0-only"
+license-files = ["COPYING"]
+authors = [
+    {name = "Trezor", email = "info@trezor.io"}
+]
+maintainers = [
+    {name = "matejcik", email = "jan.matejek@satoshilabs.com"}
+]
+keywords = ["trezor", "hardware", "wallet", "cryptocurrency", "bitcoin", "ethereum"]
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3 :: Only",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "mnemonic>=0.20",
+    "shamir-mnemonic>=0.3.0",
+    "slip10>=1.0.1",
+    "requests>=2.4.0",
+    "click>=8,<9",
+    "libusb1>=1.6.4",
+    "construct>=2.9,!=2.10.55",
+    "typing_extensions>=4.7.1",
+    "construct-classes>=0.1.2",
+    "cryptography>=47",
+    "noiseprotocol>=0.3.1,<0.4.0",
+    "platformdirs>=4.4.0",
+    "keyring>=25.7.0",
+]
+
+[project.optional-dependencies]
+hidapi = ["hidapi>=0.7.99.post20"]
+ethereum = ["web3>=5"]
+qt-widgets = ["PyQt5"]
+extra = ["Pillow>=10"]
+stellar = [
+    "stellar-sdk>=13; python_version < '3.10'",
+    # Protocol 27 support (SOROBAN_CREDENTIALS_ADDRESS_V2 etc.) requires
+    # stellar-sdk 15, which dropped Python 3.9.
+    "stellar-sdk>=15; python_version >= '3.10'",
+]
+ble = ["bleak>=1.1.0"]
+full = [
+    "hidapi>=0.7.99.post20",
+    "web3>=5",
+    "PyQt5",
+    "Pillow>=10",
+    "stellar-sdk>=13; python_version < '3.10'",
+    # stellar-sdk>=15 floor: see the stellar extra above
+    "stellar-sdk>=15; python_version >= '3.10'",
+    "bleak>=1.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/trezor/trezor-firmware/tree/main/python"
+Repository = "https://github.com/trezor/trezor-firmware"
+Documentation = "https://github.com/trezor/trezor-firmware/tree/main/python"
+
+[project.scripts]
+trezorctl = "trezorlib.cli.trezorctl:cli"
+
+[build-system]
+requires = ["flit_core >= 3.11,<5"]
+build-backend = "flit_core.buildapi"
+
+[tool.uv]
+package = true
+exclude-newer = "30 days"
+
+[tool.flit.module]
+name = "trezorlib"
+
+[tool.flit.sdist]
+include = [
+    "bash_completion.d",
+    "docs",
+    "stubs",
+    "tests",
+    "tools",
+    "AUTHORS",
+    "CHANGELOG.md",
+    "setup.cfg",
+    "pyrightconfig.json",
+    "tox.ini",
+]
+exclude = [
+    "tests/*.bin",
+    "src/trezorlib/_proto_messages.mako",
+]
+
+[dependency-groups]
+dev = [
+    "flake8>=2.3.0",
+    "pytest>=8.3.5",
+    "pytest-random-order>=1.2.0",
+    "tox>=4.25.0",
+    "tox-uv>=1.13.1",
+]

@@ -1,0 +1,150 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import pytest
+from shamir_mnemonic import shamir
+
+from trezorlib import device
+from trezorlib.debuglink import DebugSession as Session
+from trezorlib.messages import BackupAvailability, BackupMethod, BackupType
+
+from ...common import MOCK_GET_ENTROPY
+from ...input_flows import (
+    InputFlowBip39Backup,
+    InputFlowResetSkipBackup,
+    InputFlowSlip39AdvancedBackup,
+    InputFlowSlip39BasicBackup,
+)
+
+
+def backup_flow_bip39(session: Session, method: BackupMethod) -> bytes:
+    with session.test_ctx as client:
+        IF = InputFlowBip39Backup(client, method=method)
+        client.set_input_flow(IF.get())
+        device.backup(session, backup_method=method)
+
+    assert IF.mnemonic is not None
+    return IF.mnemonic.encode()
+
+
+def backup_flow_slip39_basic(session: Session, method: BackupMethod):
+    with session.test_ctx as client:
+        IF = InputFlowSlip39BasicBackup(client, click_info=False, method=method)
+        client.set_input_flow(IF.get())
+        device.backup(session, backup_method=method)
+
+    groups = shamir.decode_mnemonics(IF.mnemonics[:3])
+    ems = shamir.recover_ems(groups)
+    return ems.ciphertext
+
+
+def backup_flow_slip39_advanced(session: Session, method: BackupMethod):
+    with session.test_ctx as client:
+        IF = InputFlowSlip39AdvancedBackup(
+            client, click_info=False, backup_method=method
+        )
+        client.set_input_flow(IF.get())
+        device.backup(session, backup_method=method)
+
+    mnemonics = IF.mnemonics[0:3] + IF.mnemonics[5:8] + IF.mnemonics[10:13]
+    groups = shamir.decode_mnemonics(mnemonics)
+    ems = shamir.recover_ems(groups)
+    return ems.ciphertext
+
+
+VECTORS = [
+    (BackupType.Bip39, backup_flow_bip39),
+    (BackupType.Slip39_Basic_Extendable, backup_flow_slip39_basic),
+    (BackupType.Slip39_Advanced_Extendable, backup_flow_slip39_advanced),
+]
+
+
+@pytest.mark.models("core")
+@pytest.mark.parametrize("backup_type, backup_flow", VECTORS)
+@pytest.mark.setup_client(uninitialized=True)
+def test_skip_backup_msg(
+    session: Session, backup_type, backup_flow, backup_method: BackupMethod
+):
+    assert session.features.initialized is False
+
+    with session.test_ctx:
+        device.setup(
+            session,
+            skip_backup=True,
+            passphrase_protection=False,
+            pin_protection=False,
+            backup_type=backup_type,
+            entropy_check_count=0,
+            _get_entropy=MOCK_GET_ENTROPY,
+        )
+
+    assert session.features.initialized is True
+    assert session.features.backup_availability == BackupAvailability.Required
+    assert session.features.unfinished_backup is False
+    assert session.features.no_backup is False
+    assert session.features.backup_type is backup_type
+
+    secret = backup_flow(session, backup_method)
+
+    assert session.features.initialized is True
+    assert session.features.backup_availability == BackupAvailability.NotAvailable
+    assert session.features.unfinished_backup is False
+    assert session.features.backup_type is backup_type
+
+    assert secret is not None
+    state = session.debug.state()
+    assert state.mnemonic_type is backup_type
+    assert state.mnemonic_secret == secret
+
+
+@pytest.mark.models("core")
+@pytest.mark.parametrize("backup_type, backup_flow", VECTORS)
+@pytest.mark.setup_client(uninitialized=True)
+def test_skip_backup_manual(
+    session: Session, backup_type: BackupType, backup_flow, backup_method: BackupMethod
+):
+    assert session.features.initialized is False
+
+    with session.test_ctx as client:
+        IF = InputFlowResetSkipBackup(client)
+        client.set_input_flow(IF.get())
+        device.setup(
+            session,
+            pin_protection=False,
+            passphrase_protection=False,
+            backup_type=backup_type,
+            entropy_check_count=0,
+            _get_entropy=MOCK_GET_ENTROPY,
+        )
+
+    assert session.features.initialized is True
+    assert session.features.backup_availability == BackupAvailability.Required
+    assert session.features.unfinished_backup is False
+    assert session.features.no_backup is False
+    assert session.features.backup_type is backup_type
+
+    secret = backup_flow(session, backup_method)
+
+    session.refresh_features()
+    assert session.features.initialized is True
+    assert session.features.backup_availability == BackupAvailability.NotAvailable
+    assert session.features.unfinished_backup is False
+    assert session.features.backup_type is backup_type
+
+    assert secret is not None
+    state = session.debug.state()
+    assert state.mnemonic_type is backup_type
+    assert state.mnemonic_secret == secret

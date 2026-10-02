@@ -1,0 +1,10 @@
+EthereumNetworkInfo.name                max_size:256
+EthereumNetworkInfo.symbol              max_size:256
+
+EthereumTokenInfo.name                  max_size:256
+EthereumTokenInfo.address               max_size:20
+EthereumTokenInfo.symbol                max_size:256
+
+SolanaTokenInfo.name                  type:FT_IGNORE
+SolanaTokenInfo.mint                  type:FT_IGNORE
+SolanaTokenInfo.symbol                type:FT_IGNORE

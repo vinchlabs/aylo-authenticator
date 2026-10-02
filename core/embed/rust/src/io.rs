@@ -1,0 +1,260 @@
+#[cfg(feature = "micropython")]
+use crate::micropython::{buffer::get_buffer, gc::Gc, obj::Obj};
+
+pub enum Error {
+    EOFError,
+    OutOfRange,
+}
+
+#[cfg(feature = "micropython")]
+impl From<Error> for crate::micropython::error::Error {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::EOFError => crate::micropython::error::Error::EOFError,
+            Error::OutOfRange => crate::micropython::error::Error::OutOfRange,
+        }
+    }
+}
+
+pub struct InputStream<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> InputStream<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
+
+    pub fn tell(&self) -> usize {
+        self.pos
+    }
+
+    pub fn read_stream(&mut self, len: usize) -> Result<Self, Error> {
+        self.read(len).map(Self::new)
+    }
+
+    pub fn read(&mut self, len: usize) -> Result<&'a [u8], Error> {
+        let buf = self
+            .buf
+            .get(self.pos..self.pos + len)
+            .ok_or(Error::EOFError)?;
+        self.pos += len;
+        Ok(buf)
+    }
+
+    pub fn rest(self) -> &'a [u8] {
+        if self.pos > self.buf.len() {
+            &[]
+        } else {
+            &self.buf[self.pos..]
+        }
+    }
+
+    pub fn read_byte(&mut self) -> Result<u8, Error> {
+        let val = self.buf.get(self.pos).ok_or(Error::EOFError)?;
+        self.pos += 1;
+        Ok(*val)
+    }
+
+    pub fn read_u16_le(&mut self) -> Result<u16, Error> {
+        let buf = self.read(2)?;
+        Ok(u16::from_le_bytes(unwrap!(buf.try_into())))
+    }
+
+    pub fn read_u32_le(&mut self) -> Result<u32, Error> {
+        let buf = self.read(4)?;
+        Ok(u32::from_le_bytes(unwrap!(buf.try_into())))
+    }
+
+    pub fn read_uvarint(&mut self) -> Result<u64, Error> {
+        let mut uint = 0;
+        let mut shift = 0;
+        loop {
+            let byte = self.read_byte()?;
+            let bits = u64::from(byte) & 0x7F;
+            if shift >= 64 || shift > bits.leading_zeros() {
+                return Err(Error::OutOfRange);
+            }
+            uint += bits << shift;
+            shift += 7;
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        Ok(uint)
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum BinaryData<'a> {
+    Slice(&'a [u8]),
+    #[cfg(feature = "micropython")]
+    Object(Obj),
+    #[cfg(feature = "micropython")]
+    AllocatedSlice(Gc<[u8]>),
+}
+
+impl<'a> BinaryData<'a> {
+    /// Returns `true` if the binary data is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the length of the binary data in bytes.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Slice(data) => data.len(),
+            #[cfg(feature = "micropython")]
+            // SAFETY: We expect no existing mutable reference.
+            Self::Object(obj) => unsafe { unwrap!(get_buffer(*obj)).len() },
+            #[cfg(feature = "micropython")]
+            Self::AllocatedSlice(data) => data.len(),
+        }
+    }
+
+    /// Reads binary data from the source into the buffer.
+    /// - 'ofs' is the offset in bytes from the start of the binary data.
+    /// - 'buff' is the buffer to read the data into.
+    ///
+    /// Returns the number of bytes read.
+    pub fn read(&self, ofs: usize, buff: &mut [u8]) -> usize {
+        match self {
+            Self::Slice(data) => {
+                let remaining = data.len().saturating_sub(ofs);
+                let size = buff.len().min(remaining);
+                buff[..size].copy_from_slice(&data[ofs..ofs + size]);
+                size
+            }
+
+            // SAFETY: We expect no existing mutable reference to `obj`.
+            #[cfg(feature = "micropython")]
+            Self::Object(obj) => {
+                let data = unsafe { unwrap!(get_buffer(*obj)) };
+                let remaining = data.len().saturating_sub(ofs);
+                let size = buff.len().min(remaining);
+                buff[..size].copy_from_slice(&data[ofs..ofs + size]);
+                size
+            }
+
+            #[cfg(feature = "micropython")]
+            Self::AllocatedSlice(data) => {
+                let remaining = data.len().saturating_sub(ofs);
+                let size = buff.len().min(remaining);
+                buff[..size].copy_from_slice(&data[ofs..ofs + size]);
+                size
+            }
+        }
+    }
+}
+
+impl<'a> PartialEq for BinaryData<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Slice(a), Self::Slice(b)) => {
+                core::ptr::eq(a.as_ptr(), b.as_ptr()) && a.len() == b.len()
+            }
+            #[cfg(feature = "micropython")]
+            (Self::Object(a), Self::Object(b)) => a == b,
+            #[cfg(feature = "micropython")]
+            (Self::AllocatedSlice(a), Self::AllocatedSlice(b)) => {
+                core::ptr::eq(a.as_ptr(), b.as_ptr()) && a.len() == b.len()
+            }
+            #[cfg(feature = "micropython")]
+            _ => false,
+        }
+    }
+}
+
+#[cfg(feature = "micropython")]
+impl From<Gc<[u8]>> for BinaryData<'static> {
+    fn from(data: Gc<[u8]>) -> Self {
+        Self::AllocatedSlice(data)
+    }
+}
+
+#[cfg(feature = "micropython")]
+impl TryFrom<Obj> for BinaryData<'static> {
+    type Error = crate::micropython::error::Error;
+
+    fn try_from(obj: Obj) -> Result<Self, Self::Error> {
+        if !obj.is_bytes() {
+            return Err(crate::micropython::error::Error::TypeError);
+        }
+        Ok(Self::Object(obj))
+    }
+}
+
+impl<'a> From<&'a [u8]> for BinaryData<'a> {
+    fn from(data: &'a [u8]) -> Self {
+        Self::Slice(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_uvarint_basic() {
+        assert_eq!(unwrap!(InputStream::new(&[0x00]).read_uvarint()), 0);
+        assert_eq!(unwrap!(InputStream::new(&[0x7F]).read_uvarint()), 127);
+        assert_eq!(unwrap!(InputStream::new(&[0x80, 0x01]).read_uvarint()), 128);
+        assert_eq!(unwrap!(InputStream::new(&[0xAC, 0x02]).read_uvarint()), 300);
+    }
+
+    #[test]
+    fn read_uvarint_max() {
+        // u64::MAX is the largest value that fits: 10 bytes, last byte 0x01.
+        let buf = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        assert_eq!(unwrap!(InputStream::new(&buf).read_uvarint()), u64::MAX);
+    }
+
+    #[test]
+    fn read_uvarint_overflow() {
+        // 2^64: 10 bytes, last byte 0x02.
+        let buf = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02];
+        assert!(matches!(
+            InputStream::new(&buf).read_uvarint(),
+            Err(Error::OutOfRange)
+        ));
+
+        // u64::MAX + 1 (would wrap to 0 without the overflow check).
+        let buf = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
+        assert!(matches!(
+            InputStream::new(&buf).read_uvarint(),
+            Err(Error::OutOfRange)
+        ));
+
+        // Encoding longer than 10 bytes (would shift past 64 bits).
+        let mut buf = [0x80; 11];
+        buf[10] = 0x01;
+        assert!(matches!(
+            InputStream::new(&buf).read_uvarint(),
+            Err(Error::OutOfRange)
+        ));
+
+        // Zero-padded 11-byte encoding: the 11th byte carries no bits, but
+        // the loop must still stop before the shift amount reaches 64.
+        let buf = [
+            0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00,
+        ];
+        assert!(matches!(
+            InputStream::new(&buf).read_uvarint(),
+            Err(Error::OutOfRange)
+        ));
+    }
+
+    #[test]
+    fn read_uvarint_eof() {
+        // Truncated stream: continuation bit set but no more bytes.
+        assert!(matches!(
+            InputStream::new(&[0x80]).read_uvarint(),
+            Err(Error::EOFError)
+        ));
+    }
+}

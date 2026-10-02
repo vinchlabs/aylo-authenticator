@@ -1,0 +1,301 @@
+from micropython import const
+from typing import TYPE_CHECKING
+
+import trezor.ui.layouts as layouts
+from trezor import TR
+from trezor.strings import chunkify_number, format_amount
+
+from .helpers import get_encoded_address
+
+if TYPE_CHECKING:
+    from buffer_types import AnyBytes
+
+    from trezor.messages import (
+        TronTransferContract,
+        TronTriggerSmartContract,
+        TronVoteWitnessContract,
+    )
+
+
+def format_trx_amount(amount: int) -> str:
+    # 1 SUN = 0.000001 TRX
+    _TRX_AMOUNT_DECIMALS = const(6)
+
+    return f"{format_amount(amount, _TRX_AMOUNT_DECIMALS)} TRX"
+
+
+def format_token_amount(amount: int, token_decimals: int, token_symbol: str) -> str:
+    return f"{format_amount(amount, token_decimals)} {token_symbol}"
+
+
+def format_energy_amount(amount: int) -> str:
+    return f"{format_amount(amount, 0)} SUN"
+
+
+def format_blocks_as_time(blocks: int) -> str:
+
+    # Tron gives each SR 3 seconds to produce a block.
+    total_seconds = blocks * 3
+
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
+
+
+async def confirm_trx_transfer(
+    contract: TronTransferContract,
+    account_details: tuple[str | None, str],
+    chunkify: bool,
+) -> None:
+    await layouts.confirm_tron_send(
+        amount=format_trx_amount(contract.amount),
+        fee=None,
+        account_details=account_details,
+        address=get_encoded_address(contract.to_address),
+        chunkify=chunkify,
+    )
+
+
+# TODO: Refactor ETH references to crypto-neutral references.
+async def confirm_unknown_smart_contract(
+    contract: TronTriggerSmartContract,
+    fee_limit: int,
+    trx_value: int | None,
+    chunkify: bool,
+) -> None:
+
+    from trezor.enums import ButtonRequestType
+    from trezor.ui.layouts import (
+        confirm_address,
+        confirm_blob,
+        confirm_ethereum_unknown_contract_warning,
+        confirm_tron_summary,
+    )
+
+    await confirm_ethereum_unknown_contract_warning(TR.words__send)
+
+    contract_address = get_encoded_address(contract.contract_address)
+    await confirm_address(
+        title=TR.ethereum__token_contract,
+        address=contract_address,
+        chunkify=chunkify,
+    )
+
+    await confirm_blob(
+        "confirm_smart_contract_data",
+        TR.ethereum__title_input_data,
+        contract.data,
+        chunkify=False,
+        verb=TR.buttons__confirm,
+        verb_cancel=TR.buttons__cancel_sign,
+        br_code=ButtonRequestType.SignTx,
+        ask_pagination=True,
+    )
+
+    await confirm_tron_summary(
+        title=TR.words__title_summary,
+        amount=format_trx_amount(trx_value) if trx_value else None,
+        fee=format_energy_amount(fee_limit),
+    )
+
+
+async def confirm_known_trc20_smart_contract(
+    is_approve: bool,
+    recipient_addr: bytes,
+    amount_arg: memoryview,
+    fee_limit: int,
+    token_decimals: int,
+    token_symbol: str,
+    trx_value: int | None,
+    chunkify: bool,
+) -> None:
+    from trezor.ui.layouts import confirm_tron_approve, confirm_tron_transfer
+
+    if is_approve:
+        is_revoke = False
+        if all(byte == 255 for byte in amount_arg):
+            amount_str = f"{TR.words__unlimited} {token_symbol}"
+        else:
+            if all(byte == 0 for byte in amount_arg):
+                is_revoke = True
+            amount_str = format_token_amount(
+                int.from_bytes(amount_arg, "big"), token_decimals, token_symbol
+            )
+
+        await confirm_tron_approve(
+            recipient_addr=get_encoded_address(recipient_addr),
+            amount_str=amount_str,
+            is_revoke=is_revoke,
+            maximum_fee=format_energy_amount(fee_limit),
+            native_amount_str=format_trx_amount(trx_value) if trx_value else None,
+            chunkify=chunkify,
+        )
+    else:
+        await confirm_tron_transfer(
+            recipient_addr=get_encoded_address(recipient_addr),
+            amount_str=format_token_amount(
+                int.from_bytes(amount_arg, "big"), token_decimals, token_symbol
+            ),
+            maximum_fee=format_energy_amount(fee_limit),
+            native_amount_str=format_trx_amount(trx_value) if trx_value else None,
+            chunkify=chunkify,
+        )
+
+
+async def confirm_freeze_operations(
+    owner_address: AnyBytes,
+    balance: int,
+    resource: int,
+    title: str,
+    chunkify: bool,
+) -> None:
+    from trezor.enums import TronResourceCode
+    from trezor.ui.layouts import confirm_address, confirm_properties
+
+    await confirm_address(
+        title=title,
+        address=get_encoded_address(owner_address),
+        chunkify=chunkify,
+    )
+
+    await confirm_properties(
+        br_name="tron/freeze",
+        title=TR.words__title_summary,
+        props=(
+            (TR.words__amount, format_trx_amount(balance), False),
+            (
+                TR.words__resource,
+                ("Energy" if resource == TronResourceCode.ENERGY else "Bandwidth"),
+                False,
+            ),
+        ),
+        hold=True,
+    )
+
+
+async def confirm_claim(
+    owner_address: str | None,
+    account_details: tuple[str | None, str],
+    intro_question: str,
+    chunkify: bool,
+) -> None:
+
+    title = TR.ethereum__staking_claim
+
+    # When the owner address differs from the signing address, confirm it first
+    # (with a warning footer) so the final screen is the hold-to-confirm action.
+    if owner_address is not None:
+        await layouts.confirm_address(
+            title=title,
+            description=TR.tron__owner_address,
+            address=owner_address,
+            verb=TR.buttons__continue,
+            footer=(TR.address__warning_not_yours, True),
+            chunkify=chunkify,
+        )
+
+    await layouts.confirm_tron_claim(
+        title=title,
+        intro_question=intro_question,
+        account=account_details[0],
+        account_path=account_details[1],
+    )
+
+
+async def confirm_delegate_resource(
+    receiver_address: AnyBytes,
+    balance: int,
+    resource: int,
+    lock_period: int | None,
+) -> None:
+    from trezor.enums import TronResourceCode
+    from trezor.ui.layouts import confirm_address, confirm_properties
+
+    title = TR.tron__delegate_resource
+    br_name = "tron/delegate"
+
+    await confirm_address(
+        title=title,
+        description=TR.words__recipient,
+        address=get_encoded_address(receiver_address),
+        chunkify=True,
+        br_name=f"{br_name}/recipient",
+    )
+
+    await confirm_properties(
+        br_name=f"{br_name}/resource",
+        title=title,
+        props=[
+            (TR.words__amount, format_trx_amount(balance), False),
+            (
+                TR.words__resource,
+                "Energy" if resource == TronResourceCode.ENERGY else "Bandwidth",
+                False,
+            ),
+        ],
+        hold=lock_period is None,
+    )
+    if lock_period:
+        await confirm_properties(
+            br_name=f"{br_name}/lock_period",
+            title=title,
+            subtitle=TR.tron__lock_period,
+            props=[
+                (TR.tron__lockperiod_time, format_blocks_as_time(lock_period), True),
+                (TR.tron__lockperiod_blocks, chunkify_number(lock_period), True),
+            ],
+            hold=True,
+        )
+
+
+async def confirm_undelegate_resource(
+    receiver_address: AnyBytes,
+    balance: int,
+    resource: int,
+) -> None:
+    from trezor.enums import TronResourceCode
+    from trezor.ui.layouts import confirm_address, confirm_properties
+
+    title = TR.tron__undelegate_resource
+    br_name = "tron/undelegate"
+
+    await confirm_address(
+        title=title,
+        description=TR.words__from_title,
+        address=get_encoded_address(receiver_address),
+        chunkify=True,
+        br_name=f"{br_name}/from_address",
+    )
+
+    await confirm_properties(
+        title=title,
+        props=[
+            (TR.words__amount, format_trx_amount(balance), False),
+            (
+                TR.words__resource,
+                "Energy" if resource == TronResourceCode.ENERGY else "Bandwidth",
+                False,
+            ),
+        ],
+        br_name=f"{br_name}/resource",
+        hold=True,
+    )
+
+
+async def confirm_votes(contract: TronVoteWitnessContract) -> None:
+    from trezor.ui.layouts import confirm_tron_voting
+
+    voting_list: list[tuple[int, str]] = [
+        (vote.count, get_encoded_address(vote.address)) for vote in contract.votes
+    ]
+    await confirm_tron_voting(voting_list)

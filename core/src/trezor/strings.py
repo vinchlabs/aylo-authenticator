@@ -1,0 +1,159 @@
+import utime
+
+from . import TR
+
+
+def format_amount(amount: int, decimals: int) -> str:
+    if amount < 0:
+        amount = -amount
+        sign = "-"
+    else:
+        sign = ""
+    d = 10**decimals
+    integer = amount // d
+    decimal = amount % d
+
+    # TODO: bug in mpz: https://github.com/micropython/micropython/issues/8984
+    grouped_integer = f"{integer:,}".lstrip(",")
+
+    s = f"{sign}{grouped_integer}.{decimal:0{decimals}}".rstrip("0").rstrip(".")
+    return s
+
+
+def format_amount_unit(amount: str, unit: str) -> str:
+    """
+    Formats an amount and a unit.
+    """
+    return f"{amount} {unit}"
+
+
+def format_plural_english(string: str, count: int, plural: str) -> str:
+    """
+    Adds plural form to a string based on `count`.
+    !! Does not work with irregular words !!
+
+    Example:
+    >>> format_plural_english("We need {count} more {plural}", 3, "share")
+    'We need 3 more shares'
+    >>> format_plural_english("We need {count} more {plural}", 1, "share")
+    'We need 1 more share'
+    >>> format_plural_english("{count} {plural}", 4, "candy")
+    '4 candies'
+    """
+    if not all(s in string for s in ("{count}", "{plural}")):
+        # string needs to have {count} and {plural} inside
+        raise ValueError
+
+    if count == 0 or count > 1:
+        # candy -> candies, but key -> keys
+        if plural[-1] == "y" and plural[-2] not in "aeiouy":
+            plural = plural[:-1] + "ies"
+        elif plural[-1] in "hsxz":
+            plural = plural + "es"
+        else:
+            plural = plural + "s"
+
+    return string.format(count=count, plural=plural)
+
+
+def format_plural(string: str, count: int, plurals: str) -> str:
+    """
+    Adds plural form to a string based on `count`.
+    """
+    if not all(s in string for s in ("{count}", "{plural}")):
+        # string needs to have {count} and {plural} inside
+        raise ValueError
+
+    plural_options = plurals.split("|")
+    if len(plural_options) not in (2, 3):
+        # plurals need to have 2 or 3 options
+        raise ValueError
+
+    # First one is for singular, last one is for MANY (or zero)
+    if count == 1:
+        plural = plural_options[0]
+    else:
+        plural = plural_options[-1]
+
+    # In case there are three options, the middle one is for FEW (2-4)
+    if len(plural_options) == 3:
+        # TODO: this is valid for czech - are there some other languages that have it differently?
+        # In that case we need to add language-specific rules
+        if 1 < count < 5:
+            plural = plural_options[1]
+
+    return string.format(count=count, plural=plural)
+
+
+_TIME_UNITS = (
+    (TR.plurals__days, 24 * 60 * 60 * 1000),
+    (TR.plurals__hours, 60 * 60 * 1000),
+    (TR.plurals__minutes, 60 * 1000),
+    (TR.plurals__seconds, 1000),
+    (TR.plurals__milliseconds, 1),
+)
+
+
+def _format_duration(
+    milliseconds: int,
+    units: tuple[tuple[str, int], ...] = _TIME_UNITS,
+    truncate: bool = False,
+) -> str:
+    """
+    Returns human-friendly representation of a duration given in milliseconds.
+
+    With `truncate=True` only the largest matching unit is shown, dropping all
+    decimals (e.g. 119 seconds -> "1 minute").
+
+    With `truncate=False` the duration is formatted exactly, joining all
+    non-zero components (e.g. 61 seconds -> "1 minute 1 second").
+    """
+    components: list[str] = []
+    remainder = milliseconds
+    for unit, divisor in units:
+        count, remainder = divmod(remainder, divisor)
+        if count:
+            components.append(format_plural("{count} {plural}", count, unit))
+            if truncate:
+                break
+
+    # empty components means zero duration; use the smallest unit
+    return " ".join(components) or format_plural("{count} {plural}", 0, units[-1][0])
+
+
+def format_duration_ms(milliseconds: int) -> str:
+    """
+    Returns human-friendly representation of a duration. Truncates all decimals.
+    """
+    return _format_duration(milliseconds, truncate=True)
+
+
+def format_duration(seconds: int) -> str:
+    """
+    Returns human-friendly representation of a duration given in seconds.
+    """
+    return _format_duration(seconds * 1000, units=_TIME_UNITS[:-1])
+
+
+def format_timestamp(timestamp: int) -> str:
+    """
+    Returns human-friendly representation of a unix timestamp (in seconds format).
+    Minutes and seconds are always displayed as 2 digits.
+    Example:
+    >>> format_timestamp(0)
+    '1970-01-01 00:00:00'
+    >>> format_timestamp(1616051824)
+    '2021-03-18 07:17:04'
+    """
+    d = utime.gmtime1970(timestamp)
+    return f"{d[0]}-{d[1]:02d}-{d[2]:02d} {d[3]:02d}:{d[4]:02d}:{d[5]:02d}"
+
+
+def chunkify_number(number: int, chunk_size: int = 3) -> str:
+    # Group digits from the right in chunks of `chunk_size`, separated by spaces.
+    # e.g. 123456 => "123 456", 1234 => "1 234"
+    digits = str(number)
+    chunks = []
+    for i in range(len(digits), 0, -chunk_size):
+        chunks.append(digits[max(0, i - chunk_size) : i])
+    return " ".join(reversed(chunks))

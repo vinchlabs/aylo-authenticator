@@ -1,0 +1,21 @@
+{
+    "include": [
+        "tools",
+        "common",
+        "tests"
+    ],
+    "exclude": [
+        "tools/pyright_tool.py",
+        "tools/snippets",
+        "tests/burn_tests",
+        "tests/click_tests",
+        "tests/device_tests",
+        "tests/fido_tests",
+        "tests/ui_tests"
+    ],
+    "stubPath": "mocks/generated",
+    "typeCheckingMode": "basic",
+    "pythonVersion": "3.12",
+    "reportMissingModuleSource": false,
+    "reportMissingImports": false
+}

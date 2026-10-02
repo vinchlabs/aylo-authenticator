@@ -1,0 +1,12 @@
+header = "T2B1/boards/trezor_r_v10.h"
+emulator_header = "T2B1/boards/t2b1-unix.h"
+
+[display]
+driver = "io/display_vg2864"
+panel = "io/display_panel_vg2864"
+
+[button]
+
+[optiga]
+
+[sbu]

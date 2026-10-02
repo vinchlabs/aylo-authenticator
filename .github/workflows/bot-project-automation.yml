@@ -1,0 +1,43 @@
+name: "[Bot] add to GitHub project"
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  repository-projects: write
+
+jobs:
+  project-add:
+    # run only in 'trezor/trezor-firmware' repository
+    if: github.repository == 'trezor/trezor-firmware'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Generate GitHub App token
+        id: trezor-bot-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3  # actions/create-github-app-token@v3.1.1
+        with:
+          client-id: ${{ secrets.TREZOR_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.TREZOR_BOT_PRIVATE_KEY }}
+
+      - name: Add new pull request to the Firmware project
+        # run only for pull requests
+        if: github.event_name == 'pull_request'
+        uses: actions/add-to-project@158aad9ed186a4842abf69d0f8071a0ff95312d0  # main@2026-01-06
+        with:
+          project-url: https://github.com/orgs/trezor/projects/60
+          github-token: ${{ steps.trezor-bot-token.outputs.token }}
+
+      - name: Add new issue to the Firmware project
+        # run only for issues
+        if: github.event_name == 'issues'
+        uses: actions/add-to-project@158aad9ed186a4842abf69d0f8071a0ff95312d0  # main@2026-01-06
+        with:
+          project-url: https://github.com/orgs/trezor/projects/60
+          github-token: ${{ steps.trezor-bot-token.outputs.token }}

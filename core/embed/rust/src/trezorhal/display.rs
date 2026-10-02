@@ -1,0 +1,61 @@
+#[cfg(feature = "framebuffer")]
+use core::ptr;
+
+use ffi::{DISPLAY_RESX_, DISPLAY_RESY_};
+
+use super::ffi;
+
+pub const DISPLAY_RESX: u32 = DISPLAY_RESX_;
+pub const DISPLAY_RESY: u32 = DISPLAY_RESY_;
+
+pub fn set_backlight(val: u8) -> bool {
+    unsafe { ffi::display_set_backlight(val) }
+}
+
+pub fn get_backlight() -> u8 {
+    unsafe { ffi::display_get_backlight() }
+}
+
+pub fn sync() {
+    // NOTE: The sync operation is not called for tests because the linker
+    // would otherwise report missing symbols if the tests are built with ASAN.
+    #[cfg(not(any(feature = "framebuffer", feature = "test")))]
+    unsafe {
+        ffi::display_wait_for_sync();
+    }
+}
+
+pub fn refresh() {
+    unsafe {
+        ffi::display_refresh();
+    }
+}
+
+pub fn is_recording() -> bool {
+    unsafe { ffi::display_is_recording() }
+}
+
+pub fn record_screen() {
+    unsafe {
+        ffi::display_record_screen();
+    }
+}
+
+#[cfg(feature = "framebuffer")]
+pub fn get_frame_buffer() -> Option<(&'static mut [u8], usize)> {
+    let mut fb_info = ffi::display_fb_info_t {
+        ptr: ptr::null_mut(),
+        size: 0,
+        stride: 0,
+    };
+
+    unsafe { ffi::display_get_frame_buffer(&mut fb_info) };
+
+    if fb_info.ptr.is_null() {
+        return None;
+    }
+
+    let fb = unsafe { core::slice::from_raw_parts_mut(fb_info.ptr as *mut u8, fb_info.size) };
+
+    Some((fb, fb_info.stride))
+}

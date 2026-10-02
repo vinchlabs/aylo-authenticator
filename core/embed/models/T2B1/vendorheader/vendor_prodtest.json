@@ -1,0 +1,23 @@
+{
+    "header_len": 512,
+    "text": "UNSAFE, FACTORY TEST ONLY",
+    "hw_model": "T2B1",
+    "expiry": 0,
+    "version": [0, 1],
+    "sig_m": 2,
+    "trust": {
+        "reserved": 0,
+        "limit_runtime": false,
+        "deny_provisioning_access": false,
+        "_dont_provide_secret": false,
+        "allow_run_with_secret": true,
+        "show_vendor_string": false,
+        "require_user_click": false,
+        "red_background": false,
+        "delay": 0
+    },
+    "pubkeys": [
+        "0c0b31408416bd1e813e817599c3320bf775eb1e1843344a1108fdec775fee29",
+        "ed5daba70a99d5c816e6d8bec1c2ae1bb7be804ceddbbe42be772521ca561122"
+    ]
+}

@@ -1,0 +1,82 @@
+#[cfg(feature = "micropython")]
+use crate::micropython::{
+    macros::{obj_dict, obj_map, obj_type},
+    qstr::Qstr,
+    simple_type::SimpleTypeObj,
+    typ::FullType,
+    Error, Obj,
+};
+use crate::strutil::TString;
+
+/// Homescreen notification.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
+pub struct Notification {
+    pub text: TString<'static>,
+    pub level: NotificationLevel,
+    pub actionable: bool,
+}
+
+impl Notification {
+    pub fn new(text: TString<'static>, level: NotificationLevel, actionable: bool) -> Self {
+        Self {
+            text,
+            level,
+            actionable,
+        }
+    }
+}
+
+/// Notification level determining the style of notification.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug)]
+pub enum NotificationLevel {
+    /// Strong warning, e.g. "Backup failed"
+    Alert = 0,
+    /// Warning, e.g. "PIN not set"
+    Warning = 1,
+    /// Information, e.g. "Connected" or "Experimental features"
+    Info = 2,
+    /// Successful operation, e.g. "Coinjoin authorized"
+    Success = 3,
+}
+
+impl TryFrom<u8> for NotificationLevel {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(NotificationLevel::Alert),
+            1 => Ok(NotificationLevel::Warning),
+            2 => Ok(NotificationLevel::Info),
+            3 => Ok(NotificationLevel::Success),
+            _ => Err(()),
+        }
+    }
+}
+
+#[cfg(feature = "micropython")]
+impl TryFrom<Obj> for NotificationLevel {
+    type Error = Error;
+
+    fn try_from(obj: Obj) -> Result<Self, Self::Error> {
+        let val = u8::try_from(obj)?;
+        match Self::try_from(val) {
+            Ok(this) => Ok(this),
+            Err(()) => Err(Error::OutOfRange),
+        }
+    }
+}
+
+#[cfg(feature = "micropython")]
+static NOTIFICATION_LEVEL_TYPE: FullType = obj_type! {
+    name: Qstr::MP_QSTR_NotificationLevel,
+    locals: &obj_dict!(obj_map! {
+        Qstr::MP_QSTR_ALERT => Obj::small_int(0),
+        Qstr::MP_QSTR_WARNING => Obj::small_int(1),
+        Qstr::MP_QSTR_INFO => Obj::small_int(2),
+        Qstr::MP_QSTR_SUCCESS => Obj::small_int(3),
+    }),
+};
+
+#[cfg(feature = "micropython")]
+pub static NOTIFICATION_LEVEL_OBJ: SimpleTypeObj = SimpleTypeObj::new(&NOTIFICATION_LEVEL_TYPE);

@@ -1,0 +1,36 @@
+use std::process;
+
+use anyhow::{Context, Result, ensure};
+
+use crate::args::UploadArgs;
+use crate::helpers;
+
+pub fn upload(args: UploadArgs) -> Result<()> {
+    ensure!(
+        args.project.uploadable(),
+        "trezorctl upload is not supported for `{}`",
+        args.project.binary_name()
+    );
+
+    let binary =
+        helpers::artifacts_dir(args.model)?.join(format!("{}.bin", args.project.binary_name()));
+
+    let binary = binary
+        .canonicalize()
+        .with_context(|| format!("Failed to locate `{}` for upload", binary.display()))?;
+
+    println!(
+        "Uploading `{}` to device using `trezorctl`",
+        binary.display()
+    );
+
+    let status = process::Command::new("trezorctl")
+        .args(["fw", "update", "-s", "-f"])
+        .arg(binary)
+        .status()
+        .context("Failed to spawn `trezorctl`")?;
+
+    ensure!(status.success(), "`trezorctl` failed with status: {status}");
+
+    Ok(())
+}

@@ -1,0 +1,21 @@
+# Copyright (c) 2021 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+manifest:
+  self:
+    west-commands: scripts/west-commands.yml
+
+  remotes:
+    - name: ncs
+      url-base: https://github.com/nrfconnect
+
+  projects:
+    - name: nrf
+      remote: ncs
+      repo-path: sdk-nrf
+      revision: 60d0d6c8d42dd9c7bafe544a8fdf1234d6beb916 #v2.9.0
+      import: true
+    - name: mcuboot
+      url: https://github.com/trezor/mcuboot
+      revision: 3daca2a182073f0c64a4f42b62d6fe78a3dea9a4 # trezor-v2.1.0-ncs3
+      path: bootloader/mcuboot

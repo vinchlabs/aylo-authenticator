@@ -1,0 +1,482 @@
+# flake8: noqa: F403,F405
+from common import *  # isort:skip
+
+if not utils.BITCOIN_ONLY:
+    from trezor.enums import (
+        StellarContractExecutableType,
+        StellarContractIDPreimageType,
+        StellarHostFunctionType,
+        StellarSCValType,
+        StellarSorobanAuthorizedFunctionType,
+        StellarSorobanCredentialsType,
+    )
+    from trezor.messages import (
+        StellarContractExecutable,
+        StellarContractIDPreimage,
+        StellarContractIDPreimageFromAddress,
+        StellarCreateContractArgsV2,
+        StellarHostFunction,
+        StellarInt128Parts,
+        StellarInt256Parts,
+        StellarInvokeContractArgs,
+        StellarSCVal,
+        StellarSCValMapEntry,
+        StellarSorobanAuthorizationEntry,
+        StellarSorobanAuthorizedFunction,
+        StellarSorobanAuthorizedInvocation,
+        StellarSorobanCredentials,
+        StellarUInt128Parts,
+        StellarUInt256Parts,
+    )
+    from trezor.wire import DataError
+
+    from apps.stellar.layout import (
+        _format_i128,
+        _format_i256,
+        _format_sc_val,
+        _format_u128,
+        _format_u256,
+        _parse_sep41_approve,
+        _parse_sep41_transfer,
+    )
+    from apps.stellar.operations.layout import _is_root_auth_entry
+
+    def _u32(value):
+        return StellarSCVal(type=StellarSCValType.SCV_U32, u32=value)
+
+    def _u64(value):
+        return StellarSCVal(type=StellarSCValType.SCV_U64, u64=value)
+
+    def _address(value):
+        return StellarSCVal(type=StellarSCValType.SCV_ADDRESS, address=value)
+
+    def _i128(lo, hi=0):
+        return StellarSCVal(
+            type=StellarSCValType.SCV_I128, i128=StellarInt128Parts(hi=hi, lo=lo)
+        )
+
+    def _bytes(value):
+        return StellarSCVal(type=StellarSCValType.SCV_BYTES, bytes=value)
+
+    def _string(value):
+        return StellarSCVal(type=StellarSCValType.SCV_STRING, string=value)
+
+    def _symbol(value):
+        return StellarSCVal(type=StellarSCValType.SCV_SYMBOL, symbol=value)
+
+    def _vec(items):
+        return StellarSCVal(type=StellarSCValType.SCV_VEC, vec=items)
+
+    def _map(entries):
+        return StellarSCVal(type=StellarSCValType.SCV_MAP, map=entries)
+
+    def _entry(key, value):
+        return StellarSCValMapEntry(key=key, value=value)
+
+
+@unittest.skipUnless(not utils.BITCOIN_ONLY, "altcoin")
+class TestStellarFormatIntegers(unittest.TestCase):
+    def test_format_u128(self):
+        TESTS = [
+            ((0, 0), "0"),
+            ((0, 1), "1"),
+            ((1, 0), str(2**64)),
+            ((0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), str(2**128 - 1)),
+        ]
+        for (hi, lo), expected in TESTS:
+            self.assertEqual(_format_u128(StellarUInt128Parts(hi=hi, lo=lo)), expected)
+
+    def test_format_i128(self):
+        TESTS = [
+            ((0, 0), "0"),
+            ((0, 1), "1"),
+            ((-1, 0xFFFFFFFFFFFFFFFF), "-1"),
+            ((1, 0), str(2**64)),
+            ((-1, 0), str(-(2**64))),
+            ((0x7FFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), str(2**127 - 1)),
+            ((-0x8000000000000000, 0), str(-(2**127))),
+        ]
+        for (hi, lo), expected in TESTS:
+            self.assertEqual(_format_i128(StellarInt128Parts(hi=hi, lo=lo)), expected)
+
+    def test_format_u256(self):
+        TESTS = [
+            ((0, 0, 0, 0), "0"),
+            ((0, 0, 0, 1), "1"),
+            ((0, 0, 1, 0), str(2**64)),
+            ((0, 1, 0, 0), str(2**128)),
+            ((1, 0, 0, 0), str(2**192)),
+            (
+                (
+                    0xFFFFFFFFFFFFFFFF,
+                    0xFFFFFFFFFFFFFFFF,
+                    0xFFFFFFFFFFFFFFFF,
+                    0xFFFFFFFFFFFFFFFF,
+                ),
+                str(2**256 - 1),
+            ),
+        ]
+        for (hi_hi, hi_lo, lo_hi, lo_lo), expected in TESTS:
+            parts = StellarUInt256Parts(
+                hi_hi=hi_hi, hi_lo=hi_lo, lo_hi=lo_hi, lo_lo=lo_lo
+            )
+            self.assertEqual(_format_u256(parts), expected)
+
+    def test_format_i256(self):
+        TESTS = [
+            ((0, 0, 0, 0), "0"),
+            ((0, 0, 0, 1), "1"),
+            (
+                (
+                    -1,
+                    0xFFFFFFFFFFFFFFFF,
+                    0xFFFFFFFFFFFFFFFF,
+                    0xFFFFFFFFFFFFFFFF,
+                ),
+                "-1",
+            ),
+            ((0, 0, 1, 0), str(2**64)),
+            ((-1, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0), str(-(2**64))),
+            ((0, 1, 0, 0), str(2**128)),
+            ((-1, 0xFFFFFFFFFFFFFFFF, 0, 0), str(-(2**128))),
+            ((1, 0, 0, 0), str(2**192)),
+            ((-1, 0, 0, 0), str(-(2**192))),
+            (
+                (
+                    0x7FFFFFFFFFFFFFFF,
+                    0xFFFFFFFFFFFFFFFF,
+                    0xFFFFFFFFFFFFFFFF,
+                    0xFFFFFFFFFFFFFFFF,
+                ),
+                str(2**255 - 1),
+            ),
+            ((-0x8000000000000000, 0, 0, 0), str(-(2**255))),
+        ]
+        for (hi_hi, hi_lo, lo_hi, lo_lo), expected in TESTS:
+            parts = StellarInt256Parts(
+                hi_hi=hi_hi, hi_lo=hi_lo, lo_hi=lo_hi, lo_lo=lo_lo
+            )
+            self.assertEqual(_format_i256(parts), expected)
+
+
+@unittest.skipUnless(not utils.BITCOIN_ONLY, "altcoin")
+class TestStellarFormatScVal(unittest.TestCase):
+    def test_format_bytes(self):
+        TESTS = [
+            (b"", "0x"),
+            (b"\xde\xad\xbe\xef", "0xdeadbeef"),
+        ]
+        for value, expected in TESTS:
+            self.assertEqual(_format_sc_val(_bytes(value)), expected)
+
+    def test_format_string(self):
+        TESTS = [
+            (b"hello", '"hello"'),
+            # embedded quotes and backslashes are escaped so a string cannot forge
+            # the surrounding quotes (and thus the vec/map separators)
+            (b'a"b', r'"a\"b"'),
+            (b"a\\b", r'"a\\b"'),
+            (b'a\\"b', r'"a\\\"b"'),
+            # control characters are passed through unescaped
+            (b"a\nb", '"a\nb"'),
+            # non-UTF-8 bytes fall back to hex, like SCV_BYTES
+            (b"\xff\xfe", "0xfffe"),
+        ]
+        for value, expected in TESTS:
+            self.assertEqual(_format_sc_val(_string(value)), expected)
+
+    def test_format_symbol(self):
+        TESTS = [
+            ("transfer", '"transfer"'),
+            ('a"b', r'"a\"b"'),
+        ]
+        for value, expected in TESTS:
+            self.assertEqual(_format_sc_val(_symbol(value)), expected)
+
+    def test_format_vec(self):
+        TESTS = [
+            ([], "[]"),
+            ([_u32(1), _symbol("a")], '[1, "a"]'),
+            ([_vec([_u32(1)])], "[[1]]"),
+            # a string element cannot forge additional vec items
+            ([_string(b'", "x')], r'["\", \"x"]'),
+        ]
+        for items, expected in TESTS:
+            self.assertEqual(_format_sc_val(_vec(items)), expected)
+
+    def test_format_map(self):
+        TESTS = [
+            ([], "{}"),
+            ([_entry(_symbol("amount"), _u32(5))], '{"amount": 5}'),
+            (
+                [
+                    _entry(_symbol("amount"), _u32(5)),
+                    # a string value cannot forge map structure
+                    _entry(_symbol("k"), _string(b'", "x')),
+                ],
+                r'{"amount": 5, "k": "\", \"x"}',
+            ),
+        ]
+        for entries, expected in TESTS:
+            self.assertEqual(_format_sc_val(_map(entries)), expected)
+
+    def test_missing_val(self):
+        for name, attr in StellarSCValType.__dict__.items():
+            if not name.startswith("SCV_"):
+                continue
+            if attr in (
+                # VOID carries no data
+                StellarSCValType.SCV_VOID,
+                # VEC, MAP use `repeated` fields, so data is never missing
+                StellarSCValType.SCV_VEC,
+                StellarSCValType.SCV_MAP,
+            ):
+                continue
+            with self.assertRaises(DataError):
+                _format_sc_val(StellarSCVal(type=attr))
+
+
+# valid contract (C...) strkeys, see test_apps.stellar.address.py for the format
+_CONTRACT_A = "CAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB6N4O"
+_CONTRACT_B = "CBSGKZTHNBUWU23MNVXG64DROJZXI5LWO54HS6T3PR6X474AQGBIHDKP"
+
+# valid account (G...) strkeys
+_ACCOUNT_A = "GAXSFOOGF4ELO5HT5PTN23T5XE6D5QWL3YBHSVQ2HWOFEJNYYMRJENBV"
+_ACCOUNT_B = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+
+
+@unittest.skipUnless(not utils.BITCOIN_ONLY, "altcoin")
+class TestStellarParseSep41Call(unittest.TestCase):
+    """The SEP-41 parsers dispatch between the token UI and the raw contract
+    flow: anything but a well-formed call must parse as None (fall back),
+    never as a mangled token operation."""
+
+    def test_parse_sep41_transfer(self):
+        TESTS = [
+            # (function_name, args, expected)
+            (
+                "transfer",
+                [_address(_ACCOUNT_A), _address(_ACCOUNT_B), _i128(500)],
+                (_ACCOUNT_A, _ACCOUNT_B, 500),
+            ),
+            # a zero amount is well-formed
+            (
+                "transfer",
+                [_address(_ACCOUNT_A), _address(_ACCOUNT_B), _i128(0)],
+                (_ACCOUNT_A, _ACCOUNT_B, 0),
+            ),
+            # amounts beyond 64 bits are deliberately still shown
+            (
+                "transfer",
+                [_address(_ACCOUNT_A), _address(_ACCOUNT_B), _i128(0, hi=1)],
+                (_ACCOUNT_A, _ACCOUNT_B, 2**64),
+            ),
+            # a contract can be the sender (e.g. a liquidity pool)
+            (
+                "transfer",
+                [_address(_CONTRACT_A), _address(_ACCOUNT_B), _i128(500)],
+                (_CONTRACT_A, _ACCOUNT_B, 500),
+            ),
+            # not a transfer
+            ("approve", [_address(_ACCOUNT_A), _address(_ACCOUNT_B), _i128(500)], None),
+            # wrong argument count
+            ("transfer", [_address(_ACCOUNT_A), _address(_ACCOUNT_B)], None),
+            (
+                "transfer",
+                [_address(_ACCOUNT_A), _address(_ACCOUNT_B), _i128(500), _u32(1)],
+                None,
+            ),
+            # wrong argument types
+            ("transfer", [_symbol("from"), _address(_ACCOUNT_B), _i128(500)], None),
+            ("transfer", [_address(_ACCOUNT_A), _address(_ACCOUNT_B), _u32(500)], None),
+            # negative amounts always fall back to the generic contract UI
+            (
+                "transfer",
+                [
+                    _address(_ACCOUNT_A),
+                    _address(_ACCOUNT_B),
+                    _i128(0xFFFFFFFFFFFFFFFF, hi=-1),
+                ],
+                None,
+            ),
+        ]
+        for function_name, args, expected in TESTS:
+            call = StellarInvokeContractArgs(
+                contract_address=_CONTRACT_A, function_name=function_name, args=args
+            )
+            self.assertEqual(_parse_sep41_transfer(call), expected)
+
+    def test_parse_sep41_approve(self):
+        approve_args = [
+            _address(_ACCOUNT_A),
+            _address(_ACCOUNT_B),
+            _i128(500),
+            _u32(800_000),
+        ]
+        TESTS = [
+            # (function_name, args, expected)
+            ("approve", approve_args, (_ACCOUNT_A, _ACCOUNT_B, 500, 800_000)),
+            # a zero amount is well-formed (it revokes the approval)
+            (
+                "approve",
+                [_address(_ACCOUNT_A), _address(_ACCOUNT_B), _i128(0), _u32(800_000)],
+                (_ACCOUNT_A, _ACCOUNT_B, 0, 800_000),
+            ),
+            # not an approve
+            ("transfer", approve_args, None),
+            # wrong argument count
+            ("approve", approve_args[:3], None),
+            # live_until_ledger must be a u32
+            (
+                "approve",
+                [_address(_ACCOUNT_A), _address(_ACCOUNT_B), _i128(500), _u64(800_000)],
+                None,
+            ),
+            # negative amounts always fall back to the generic contract UI
+            (
+                "approve",
+                [
+                    _address(_ACCOUNT_A),
+                    _address(_ACCOUNT_B),
+                    _i128(0xFFFFFFFFFFFFFFFF, hi=-1),
+                    _u32(800_000),
+                ],
+                None,
+            ),
+        ]
+        for function_name, args, expected in TESTS:
+            call = StellarInvokeContractArgs(
+                contract_address=_CONTRACT_A, function_name=function_name, args=args
+            )
+            self.assertEqual(_parse_sep41_approve(call), expected)
+
+
+@unittest.skipUnless(not utils.BITCOIN_ONLY, "altcoin")
+class TestStellarIsRootAuthEntry(unittest.TestCase):
+    def test_is_root_auth_entry(self):
+        invoked = StellarHostFunction(
+            type=StellarHostFunctionType.HOST_FUNCTION_TYPE_INVOKE_CONTRACT,
+            invoke_contract=StellarInvokeContractArgs(
+                contract_address=_CONTRACT_A, function_name="submit", args=[_u32(1)]
+            ),
+        )
+
+        TESTS = [
+            ((_CONTRACT_A, "submit", [_u32(1)]), True),  # identical
+            ((_CONTRACT_A, "submit", [_u32(2)]), False),  # different arg value
+            ((_CONTRACT_A, "submit", [_u64(1)]), False),  # different arg type
+            ((_CONTRACT_A, "submit", [_u32(1), _u32(1)]), False),  # extra arg
+            ((_CONTRACT_A, "submit", []), False),  # missing arg
+            ((_CONTRACT_A, "swap", [_u32(1)]), False),  # different function
+            ((_CONTRACT_B, "submit", [_u32(1)]), False),  # different contract
+        ]
+        for (contract, function, args), is_root in TESTS:
+            auth_entry = StellarSorobanAuthorizationEntry(
+                credentials=StellarSorobanCredentials(
+                    type=StellarSorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT
+                ),
+                root_invocation=StellarSorobanAuthorizedInvocation(
+                    function=StellarSorobanAuthorizedFunction(
+                        type=StellarSorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN,
+                        contract_fn=StellarInvokeContractArgs(
+                            contract_address=contract,
+                            function_name=function,
+                            args=args,
+                        ),
+                    ),
+                    sub_invocations=[],
+                ),
+            )
+            self.assertEqual(_is_root_auth_entry(auth_entry, invoked), is_root)
+
+    def test_is_root_auth_entry_create_contract(self):
+        salt = bytes(range(32))
+        wasm_hash = bytes(range(32, 64))
+
+        def create_args(
+            address=_ACCOUNT_A, salt=salt, wasm_hash=wasm_hash, constructor_args=()
+        ):
+            return StellarCreateContractArgsV2(
+                contract_id_preimage=StellarContractIDPreimage(
+                    type=StellarContractIDPreimageType.CONTRACT_ID_PREIMAGE_FROM_ADDRESS,
+                    from_address=StellarContractIDPreimageFromAddress(
+                        address=address, salt=salt
+                    ),
+                ),
+                executable=StellarContractExecutable(
+                    type=StellarContractExecutableType.CONTRACT_EXECUTABLE_WASM,
+                    wasm_hash=wasm_hash,
+                ),
+                constructor_args=list(constructor_args),
+            )
+
+        def source_entry(function):
+            return StellarSorobanAuthorizationEntry(
+                credentials=StellarSorobanCredentials(
+                    type=StellarSorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT
+                ),
+                root_invocation=StellarSorobanAuthorizedInvocation(
+                    function=function, sub_invocations=[]
+                ),
+            )
+
+        def create_fn(args):
+            return StellarSorobanAuthorizedFunction(
+                type=StellarSorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CREATE_CONTRACT_V2_HOST_FN,
+                create_contract_v2_host_fn=args,
+            )
+
+        invoked = StellarHostFunction(
+            type=StellarHostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2,
+            create_contract_v2=create_args(constructor_args=[_u32(1)]),
+        )
+
+        TESTS = [
+            (create_args(constructor_args=[_u32(1)]), True),  # identical
+            (create_args(address=_ACCOUNT_B, constructor_args=[_u32(1)]), False),
+            (create_args(salt=bytes(32), constructor_args=[_u32(1)]), False),
+            (create_args(wasm_hash=bytes(32), constructor_args=[_u32(1)]), False),
+            (create_args(constructor_args=[_u32(2)]), False),  # different arg value
+            (create_args(constructor_args=[_u64(1)]), False),  # different arg type
+            (create_args(constructor_args=[_u32(1), _u32(1)]), False),  # extra arg
+            (create_args(), False),  # missing arg
+        ]
+        for args, is_root in TESTS:
+            self.assertEqual(
+                _is_root_auth_entry(source_entry(create_fn(args)), invoked), is_root
+            )
+
+        # a contract call and a contract creation never match each other
+        call = StellarInvokeContractArgs(
+            contract_address=_CONTRACT_A, function_name="deploy", args=[_u32(1)]
+        )
+        invoked_call = StellarHostFunction(
+            type=StellarHostFunctionType.HOST_FUNCTION_TYPE_INVOKE_CONTRACT,
+            invoke_contract=call,
+        )
+        call_fn = StellarSorobanAuthorizedFunction(
+            type=StellarSorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN,
+            contract_fn=call,
+        )
+        creation = create_fn(create_args(constructor_args=[_u32(1)]))
+        self.assertFalse(_is_root_auth_entry(source_entry(creation), invoked_call))
+        self.assertFalse(_is_root_auth_entry(source_entry(call_fn), invoked))
+
+        # a creation missing on either side never matches
+        no_creation_fn = StellarSorobanAuthorizedFunction(
+            type=StellarSorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CREATE_CONTRACT_V2_HOST_FN
+        )
+        no_creation_invoked = StellarHostFunction(
+            type=StellarHostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2
+        )
+        self.assertFalse(_is_root_auth_entry(source_entry(no_creation_fn), invoked))
+        self.assertFalse(
+            _is_root_auth_entry(source_entry(creation), no_creation_invoked)
+        )
+        self.assertFalse(
+            _is_root_auth_entry(source_entry(no_creation_fn), no_creation_invoked)
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

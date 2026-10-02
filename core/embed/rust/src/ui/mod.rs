@@ -1,0 +1,60 @@
+pub mod animation;
+#[cfg(feature = "micropython")]
+pub mod backlight;
+pub mod button_request;
+pub mod component;
+pub mod constant;
+pub mod display;
+pub mod event;
+#[cfg(all(feature = "micropython", feature = "touch"))]
+pub mod flow;
+pub mod geometry;
+pub mod lerp;
+pub mod notification;
+pub mod shape;
+pub mod util;
+
+pub mod layout;
+
+mod api;
+mod error;
+
+pub use error::UIError;
+
+#[cfg(feature = "rgb_led")]
+mod led;
+
+#[cfg(feature = "layout_bolt")]
+pub mod layout_bolt;
+#[cfg(feature = "layout_caesar")]
+pub mod layout_caesar;
+#[cfg(feature = "layout_delizia")]
+pub mod layout_delizia;
+#[cfg(feature = "layout_eckhart")]
+pub mod layout_eckhart;
+
+#[cfg(feature = "bootloader")]
+pub mod ui_bootloader;
+
+#[cfg(feature = "prodtest")]
+pub mod ui_prodtest;
+
+pub mod ui_common;
+#[cfg(feature = "micropython")]
+pub mod ui_firmware;
+
+pub use ui_common::CommonUI;
+#[cfg(feature = "ui_performance_overlay")]
+pub use ui_common::PerformanceOverlay;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "layout_bolt")] {
+        pub type ModelUI = crate::ui::layout_bolt::UIBolt;
+    } else if #[cfg(feature = "layout_caesar")] {
+        pub type ModelUI = crate::ui::layout_caesar::UICaesar;
+    } else if #[cfg(feature = "layout_delizia")] {
+        pub type ModelUI = crate::ui::layout_delizia::UIDelizia;
+    } else if #[cfg(feature = "layout_eckhart")] {
+        pub type ModelUI = crate::ui::layout_eckhart::UIEckhart;
+    }
+}

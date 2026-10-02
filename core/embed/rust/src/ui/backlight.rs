@@ -1,0 +1,44 @@
+use crate::micropython::macros::obj_type;
+use crate::micropython::qstr::{Attribute, Qstr};
+use crate::micropython::simple_type::SimpleTypeObj;
+use crate::micropython::typ::FullType;
+use crate::micropython::{ffi, util, Error, Obj};
+use crate::ui::{CommonUI, ModelUI};
+
+/*
+ * This whole module should be removed, in favor of fully
+ * moving backlight control into Rust. Relatively easy to do, but not
+ * necessary right now. Filed as https://github.com/trezor/trezor-firmware/issues/3849
+ *
+ * Consider this module temporary. (yeah yeah everyone knows "temporary"
+ * things stay forever. Written in May 2024.)
+ */
+
+static BACKLIGHT_LEVELS_TYPE: FullType = obj_type! {
+    name: Qstr::MP_QSTR_BacklightLevels,
+    attr_fn: backlight_levels_attr,
+};
+
+unsafe extern "C" fn backlight_levels_attr(_self_in: Obj, attr: ffi::qstr, dest: *mut Obj) {
+    let block = || {
+        let arg = unsafe { dest.read() };
+        if !arg.is_null() {
+            // Null destination would mean a `setattr`.
+            return Err(Error::TypeError);
+        }
+        let attr = Attribute::from_raw(attr);
+        let value = match attr.into() {
+            Qstr::MP_QSTR_NONE => ModelUI::get_backlight_none(),
+            Qstr::MP_QSTR_NORMAL => ModelUI::get_backlight_normal(),
+            Qstr::MP_QSTR_LOW => ModelUI::get_backlight_low(),
+            Qstr::MP_QSTR_DIM => ModelUI::get_backlight_dim(),
+            Qstr::MP_QSTR_MAX => ModelUI::get_backlight_max(),
+            _ => return Err(Error::AttributeError(attr)),
+        };
+        unsafe { dest.write(value.into()) };
+        Ok(())
+    };
+    unsafe { util::try_or_raise(block) }
+}
+
+pub static BACKLIGHT_LEVELS_OBJ: SimpleTypeObj = SimpleTypeObj::new(&BACKLIGHT_LEVELS_TYPE);

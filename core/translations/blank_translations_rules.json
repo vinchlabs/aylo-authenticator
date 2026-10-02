@@ -1,0 +1,452 @@
+[
+  {
+    "prefix": "ble__",
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "BLE related strings only in Eckhart"
+  },
+  {
+    "prefix": "thp__",
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "THP related strings only in Eckhart"
+  },
+  {
+    "prefix": "n1w1__",
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "N1W1 tag backup only in Eckhart"
+  },
+  {
+    "exact": [
+      "backup__type_create",
+      "backup__type_have",
+      "backup__type_n1w1",
+      "backup__type_wordlist"
+    ],
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "Backup method selection only in Eckhart"
+  },
+  {
+    "prefix": "sd_card__",
+    "allowedLayouts": [ "Bolt", "Delizia" ],
+    "description": "Only Bolt and Delizia have SD card support"
+  },
+  {
+    "exact": [ "auto_lock__on_battery", "auto_lock__on_usb" ],
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "Auto-lock distinction only in battery-powered devices."
+  },
+  {
+    "exact": [ "sn__title", "sn__action" ],
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "Extracting serial number only in Eckhart"
+  },
+  {
+    "prefix": "led__",
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "Only Eckhart has LED"
+  },
+  {
+    "prefix": "haptic_feedback__",
+    "allowedLayouts": [ "Delizia", "Eckhart" ],
+    "description": "Only Delizia and Eckhart have haptic feedback"
+  },
+  {
+    "prefix": "eos__",
+    "allowedLayouts": [ "Bolt" ],
+    "description": "Only Bolt has EOS support"
+  },
+  {
+    "prefix": "nem__",
+    "allowedLayouts": [ "Bolt" ],
+    "description": "Only Bolt has NEM support"
+  },
+  {
+    "prefix": "inputs__",
+    "allowedLayouts": [ "Caesar" ],
+    "description": "These are used only in Caesar input keyboard methods"
+  },
+  {
+    "exact": "tutorial__swipe_up_and_down",
+    "allowedLayouts": [ "Delizia" ],
+    "description": "Only Delizia has swipe up and down navigation"
+  },
+  {
+    "exact": [ "tutorial__tropic_info", "tutorial__what_is_tropic" ],
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "Only Eckhart has tropic"
+  },
+  {
+    "exact": [ "words__tap_to_wake" ],
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "Only Eckhart has tap to wake"
+  },
+  {
+    "exact": [
+      "tutorial__middle_click",
+      "tutorial__press_and_hold",
+      "tutorial__ready_to_use",
+      "tutorial__scroll_down",
+      "tutorial__sure_you_want_skip",
+      "tutorial__title_hello",
+      "tutorial__title_screen_scroll",
+      "tutorial__title_skip",
+      "tutorial__title_tutorial_complete",
+      "tutorial__use_trezor",
+      "tutorial__welcome_press_right"
+    ],
+    "allowedLayouts": [ "Caesar" ],
+    "description": "Only used by tutorial of Caesar"
+  },
+  {
+    "exact": [
+      "buttons__disconnect",
+      "buttons__forget",
+      "buttons__review",
+      "regulatory__title",
+      "wipe_code__change",
+      "wipe_code__remove",
+      "wipe_code__title",
+      "words__bluetooth",
+      "words__connected",
+      "words__disabled",
+      "words__disconnected",
+      "words__enabled",
+      "words__made_in",
+      "words__off",
+      "words__on"
+    ],
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "Only used by menu of Eckhart"
+  },
+  {
+    "exact": [
+      "tutorial__did_you_know",
+      "tutorial__first_wallet",
+      "tutorial__lets_begin",
+      "tutorial__title_easy_navigation",
+      "tutorial__title_lets_begin",
+      "tutorial__welcome_safe5"
+    ],
+    "allowedLayouts": [ "Delizia" ],
+    "description": "Only used by tutorial of Delizia"
+  },
+  {
+    "exact": [
+      "instructions__menu_to_continue",
+      "tutorial__continue",
+      "tutorial__last_one",
+      "tutorial__menu_appendix",
+      "tutorial__navigation_ts7",
+      "tutorial__one_more_step",
+      "tutorial__power",
+      "tutorial__suite_restart",
+      "tutorial__tap_to_start",
+      "tutorial__welcome_safe7"
+    ],
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "Only used by tutorial of Eckhart"
+  },
+  {
+    "exact": [
+      "instructions__hold_to_exit_tutorial",
+      "tutorial__exit",
+      "tutorial__menu",
+      "tutorial__ready_to_use_safe5",
+      "tutorial__restart_tutorial",
+      "tutorial__title_handy_menu",
+      "tutorial__title_hold",
+      "tutorial__title_well_done"
+    ],
+    "allowedLayouts": [ "Delizia", "Eckhart" ],
+    "description": "Only used by tutorials of Delizia and Eckhart"
+  },
+  {
+    "exact": [
+      "backup__create_backup_to_prevent_loss",
+      "backup__title_backup_completed",
+      "instructions__shares_start_with_1",
+      "reset__check_backup_instructions",
+      "reset__incorrect_word_selected",
+      "reset__num_of_shares_how_many",
+      "reset__num_of_shares_long_info_template",
+      "reset__repeat_for_all_shares",
+      "reset__select_threshold",
+      "reset__share_completed_template",
+      "reset__slip39_checklist_more_info_threshold_example_template",
+      "reset__slip39_checklist_more_info_threshold",
+      "reset__slip39_checklist_num_groups_x_template",
+      "reset__slip39_checklist_num_shares_x_template",
+      "reset__slip39_checklist_threshold_x_template",
+      "reset__slip39_checklist_write_down_recovery",
+      "reset__words_written_down_template",
+      "words__try_again"
+    ],
+    "allowedLayouts": [ "Delizia", "Eckhart" ],
+    "description": "Only used by backup and reset flows of Delizia and Eckhart layouts"
+  },
+  {
+    "exact": [
+      "backup__can_back_up_anytime",
+      "backup__new_wallet_successfully_created",
+      "lockscreen__title_locked",
+      "reset__all_x_of_y_template",
+      "reset__any_x_of_y_template",
+      "reset__need_all_share_template",
+      "reset__need_any_share_template",
+      "reset__needed_to_form_a_group",
+      "reset__needed_to_recover_your_wallet",
+      "reset__num_of_share_holders_template",
+      "reset__num_of_shares_basic_info_template",
+      "reset__one_share",
+      "reset__only_one_share_will_be_created",
+      "reset__set_it_to_count_template",
+      "reset__the_threshold_sets_the_number_of_shares",
+      "reset__to_form_group_template",
+      "reset__use_your_backup",
+      "reset__you_need_one_share",
+      "send__title_receiving_to",
+      "wipe_code__wipe_code_mismatch"
+    ],
+    "allowedLayouts": [ "Bolt" ],
+    "description": "These are specific to Bolt layout"
+  },
+  {
+    "exact": [
+      "addr_mismatch__key_mismatch",
+      "backup__want_to_skip",
+      "buttons__check_again",
+      "buttons__confirm_all",
+      "passphrase__title_hide",
+      "passphrase__title_source",
+      "reset__button_create",
+      "reset__button_recover",
+      "reset__continue_with_share_template",
+      "reset__finished_verifying_shares",
+      "reset__finished_verifying_wallet_backup",
+      "reset__share_checked_successfully_template",
+      "reset__slip39_checklist_title",
+      "reset__slip39_checklist_write_down",
+      "reset__wrong_word_selected",
+      "send__including_fee",
+      "words__please_check_again"
+    ],
+    "allowedLayouts": [ "Bolt", "Caesar" ],
+    "description": "These are specific to Bolt and Caesar layouts"
+  },
+  {
+    "exact": [
+      "ethereum__approve_revoke",
+      "ethereum__approve",
+      "fido__title_reset",
+      "homescreen__title_no_usb_connection",
+      "pin__enabled",
+      "progress__locking_device",
+      "recovery__enter_different_share",
+      "recovery__title_cancel_dry_run",
+      "recovery__you_have_entered",
+      "reset__more_info_at",
+      "reset__select_word_x_of_y_template",
+      "wipe_code__turn_on",
+      "words__from",
+      "words__please_try_again"
+    ],
+    "allowedLayouts": [ "Bolt", "Caesar", "Delizia" ],
+    "description": "These are specific to Bolt, Caesar, and Delizia layouts"
+  },
+  {
+    "exact": [
+      "passphrase__title_settings",
+      "pin__info",
+      "wipe_code__info"
+    ],
+    "allowedLayouts": [ "Bolt", "Caesar", "Eckhart" ],
+    "description": "These are specific to Bolt, Caesar, and Eckhart layouts"
+  },
+  {
+    "exact": [
+      "lockscreen__tap_to_connect",
+      "lockscreen__tap_to_unlock",
+      "lockscreen__title_not_connected",
+      "reset__check_share_title_template",
+      "reset__recovery_share_title_template",
+      "reset__title_set_threshold",
+      "wipe_code__invalid",
+      "words__really_wanna"
+    ],
+    "allowedLayouts": [ "Bolt", "Delizia" ],
+    "description": "These are specific to Bolt and Delizia layouts"
+  },
+  {
+    "exact": [
+      "backup__it_should_be_backed_up",
+      "fido__erase_credentials",
+      "modify_fee__new_transaction_fee",
+      "recovery__x_more_items_starting_template_plural",
+      "reset__advanced_group_threshold_info",
+      "reset__check_group_share_title_template",
+      "reset__group_description",
+      "reset__group_info",
+      "reset__group_share_title_template",
+      "reset__num_of_shares_advanced_info_template",
+      "reset__num_shares_for_group_template",
+      "reset__required_number_of_groups",
+      "reset__slip39_checklist_set_num_groups",
+      "reset__slip39_checklist_set_num_shares",
+      "reset__slip39_checklist_set_sizes_longer",
+      "reset__title_set_group_threshold",
+      "reset__title_set_number_of_groups",
+      "reset__title_set_number_of_shares",
+      "reset__total_number_of_shares_in_group_template",
+      "send__to_the_total_amount",
+      "send__you_are_contributing",
+      "sign_message__message_size"
+    ],
+    "allowedLayouts": [ "Bolt", "Delizia", "Eckhart" ],
+    "description": "These are specific to Bolt, Delizia, and Eckhart layouts"
+  },
+  {
+    "exact": [
+      "buttons__show_next",
+      "stellar__token_info"
+    ],
+    "allowedLayouts": [ "Bolt", "Eckhart" ],
+    "description": "These are specific to Bolt and Eckhart layouts"
+  },
+  {
+    "exact": [
+      "backup__it_should_be_backed_up_now",
+      "backup__recover_anytime",
+      "backup__title_backup_wallet",
+      "confirm_total__title_sending_from",
+      "fido__wanna_erase_credentials",
+      "homescreen__click_to_connect",
+      "homescreen__click_to_unlock",
+      "joint__title",
+      "joint__to_the_total_amount",
+      "joint__you_are_contributing",
+      "modify_fee__fee_rate",
+      "pin__cursor_will_change",
+      "pin__please_check_again",
+      "pin__reenter_to_confirm",
+      "pin__should_be_long",
+      "pin__title_check_pin",
+      "recovery__cursor_will_change",
+      "reset__number_of_shares_info",
+      "reset__select_correct_word",
+      "reset__share_words_title",
+      "reset__slip39_checklist_num_groups",
+      "reset__slip39_checklist_num_shares",
+      "reset__slip39_checklist_set_sizes",
+      "reset__threshold_info",
+      "reset__title_group_threshold",
+      "reset__title_number_of_shares",
+      "share_words__words_in_order",
+      "share_words__wrote_down_all",
+      "wipe_code__reenter_to_confirm",
+      "wipe_code__title_check",
+      "wipe_code__title_invalid",
+      "words__continue_with",
+      "words__keep_it_safe",
+      "words__title_check",
+      "words__title_group",
+      "words__title_remember",
+      "words__title_share",
+      "words__title_shares",
+      "words__title_threshold"
+    ],
+    "allowedLayouts": [ "Caesar" ],
+    "description": "These are specific to Caesar layout"
+  },
+  {
+    "exact": [
+      "backup__new_wallet_created",
+      "backup__title_skip",
+      "recovery__word_x_of_y_template",
+      "reset__write_down_words_template"
+    ],
+    "allowedLayouts": [ "Caesar", "Delizia", "Eckhart" ],
+    "description": "These are specific to Caesar, Delizia, and Eckhart layouts"
+  },
+  {
+    "exact": [
+      "reset__check_backup_title"
+    ],
+    "allowedLayouts": [ "Caesar", "Eckhart" ],
+    "description": "These are specific to Caesar and Eckhart layouts"
+  },
+  {
+    "exact": [
+      "brightness__changed_title",
+      "ethereum__subtitle_input_data_bytes",
+      "fido__more_credentials",
+      "homescreen__settings_title",
+      "instructions__hold_to_confirm",
+      "instructions__shares_continue_with_x_template",
+      "instructions__swipe_down",
+      "instructions__swipe_horizontally",
+      "instructions__tap_to_confirm",
+      "instructions__tap_to_continue",
+      "instructions__tap",
+      "passphrase__title_passphrase",
+      "pin__cancel_description",
+      "recovery__cancel_dry_run",
+      "reset__cancel_create_wallet",
+      "words__not_recommended",
+      "words__unlocked"
+    ],
+    "allowedLayouts": [ "Delizia" ],
+    "description": "These are specific to Delizia layout"
+  },
+  {
+    "exact": [
+      "address__cancel_contact_support",
+      "address__cancel_receive",
+      "address__public_key_confirmed",
+      "buttons__continue_anyway",
+      "buttons__view_all_data",
+      "ethereum__auth_done",
+      "ethereum__delegate_done",
+      "ethereum__revoke_done",
+      "fido__select_intro",
+      "homescreen__set_default",
+      "instructions__continue_holding",
+      "instructions__continue_in_app",
+      "instructions__enter_next_share",
+      "instructions__hold_to_sign",
+      "instructions__view_all_data",
+      "pin__cancel_info",
+      "pin__cancel_setup",
+      "send__cancel_sign",
+      "send__incl_transaction_fee",
+      "wipe_code__cancel_setup"
+    ],
+    "allowedLayouts": [ "Delizia", "Eckhart" ],
+    "description": "These are specific to Delizia and Eckhart layouts"
+  },
+  {
+    "exact": [
+      "address__check_with_source",
+      "address__warning_not_yours",
+      "backup__not_recommend",
+      "buttons__authenticate",
+      "homescreen__backup_needed_info",
+      "instructions__hold_to_continue",
+      "instructions__shares_start_with_x_template",
+      "lockscreen__unlock",
+      "passphrase__show",
+      "pin__change",
+      "pin__setup_completed",
+      "recovery__share_does_not_match",
+      "recovery__share_from_group_entered_template",
+      "reset__check_share_backup_template",
+      "reset__recovery_share_description",
+      "reset__select_word_from_share_template",
+      "reset__select_word_template",
+      "send__send_in_the_app",
+      "words__cancel_question",
+      "words__receive",
+      "words__recovery_share"
+    ],
+    "allowedLayouts": [ "Eckhart" ],
+    "description": "These are specific to Eckhart layout"
+  }
+]

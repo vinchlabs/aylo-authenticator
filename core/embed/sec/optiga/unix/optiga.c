@@ -1,0 +1,170 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <trezor_rtl.h>
+
+#include <sec/optiga.h>
+#include <sec/optiga_common.h>
+#include <sec/storage.h>
+
+#include "ecdsa.h"
+#include "nist256p1.h"
+
+#if defined(TREZOR_MODEL_T2B1)
+#include "certs/T2B1.h"
+#elif defined(TREZOR_MODEL_T3T1)
+#include "certs/T3T1.h"
+#elif defined(TREZOR_MODEL_T3B1)
+#include "certs/T3B1.h"
+#elif defined(TREZOR_MODEL_T3W1)
+#include "certs/T3W1.h"
+#else
+#error "Cert chain for specified model is not available."
+#endif
+
+static const uint8_t optiga_device_cert_chain[] = OPTIGA_DEVICE_CERT_CHAIN;
+
+optiga_sign_result optiga_sign(uint8_t index, const uint8_t *digest,
+                               size_t digest_size, uint8_t *der_signature,
+                               size_t max_der_signature_size,
+                               size_t *der_signature_size) {
+  const uint8_t DEVICE_PRIV_KEY[ECDSA_PRIVATE_KEY_SIZE] = {1};
+
+  if (index != OPTIGA_DEVICE_ECC_KEY_INDEX) {
+    return OPTIGA_SIGN_ERROR;
+  }
+
+  if (max_der_signature_size < MAX_DER_SIGNATURE_SIZE) {
+    return OPTIGA_SIGN_ERROR;
+  }
+
+  uint8_t raw_signature[ECDSA_RAW_SIGNATURE_SIZE] = {0};
+  int ret = ecdsa_sign_digest(&nist256p1, DEVICE_PRIV_KEY, digest,
+                              raw_signature, NULL, NULL);
+  if (ret != 0) {
+    return OPTIGA_SIGN_ERROR;
+  }
+
+  *der_signature_size = ecdsa_sig_to_der(raw_signature, der_signature);
+  return OPTIGA_SIGN_SUCCESS;
+}
+
+bool optiga_cert_size(uint8_t index, size_t *cert_size) {
+  if (index != OPTIGA_DEVICE_CERT_INDEX) {
+    return false;
+  }
+
+  *cert_size = sizeof(optiga_device_cert_chain);
+  return true;
+}
+
+bool optiga_read_cert(uint8_t index, uint8_t *cert, size_t max_cert_size,
+                      size_t *cert_size) {
+  if (index != OPTIGA_DEVICE_CERT_INDEX) {
+    return false;
+  }
+
+  if (max_cert_size < sizeof(optiga_device_cert_chain)) {
+    return false;
+  }
+
+  memcpy(cert, optiga_device_cert_chain, sizeof(optiga_device_cert_chain));
+  *cert_size = sizeof(optiga_device_cert_chain);
+  return true;
+}
+
+bool optiga_read_sec(uint8_t *sec) {
+  *sec = 0;
+  return true;
+}
+
+void optiga_set_sec_max(void) {}
+
+bool optiga_pin_init(optiga_ui_progress_t ui_progress) { return true; }
+
+void optiga_pin_init_time(uint32_t *time_ms) {}
+
+bool optiga_is_initialized() { return false; }
+
+bool optiga_pin_stretch_cmac_ecdh(
+    optiga_ui_progress_t ui_progress,
+    uint8_t stretched_pin[OPTIGA_PIN_SECRET_SIZE]) {
+  return true;
+}
+
+void optiga_pin_stretch_cmac_ecdh_time(
+    uint32_t *time_ms, uint8_t *optiga_sec,
+    uint32_t *optiga_last_time_decreased_ms) {}
+
+uint32_t optiga_estimate_time_ms(storage_pin_op_t op, uint8_t slot_index) {
+  return 0;
+}
+
+void optiga_random_buffer_time(uint32_t *time_ms) {}
+
+bool optiga_pin_set(
+    optiga_ui_progress_t ui_progress,
+    uint8_t stretched_pins[STRETCHED_PIN_COUNT][OPTIGA_PIN_SECRET_SIZE],
+    uint8_t hmac_reset_key[OPTIGA_PIN_SECRET_SIZE]) {
+  return true;
+}
+
+void optiga_pin_set_time(uint32_t *time_ms, uint8_t *optiga_sec,
+                         uint32_t *optiga_last_time_decreased_ms) {}
+
+optiga_pin_result optiga_pin_verify_v4(
+    optiga_ui_progress_t ui_progress,
+    const uint8_t pin_secret[OPTIGA_PIN_SECRET_SIZE],
+    uint8_t out_secret[OPTIGA_PIN_SECRET_SIZE]) {
+  memcpy(out_secret, pin_secret, OPTIGA_PIN_SECRET_SIZE);
+  return OPTIGA_PIN_SUCCESS;
+}
+
+optiga_pin_result optiga_pin_verify(
+    optiga_ui_progress_t ui_progress, uint8_t pin_index,
+    uint8_t stretched_pin[OPTIGA_PIN_SECRET_SIZE]) {
+  return OPTIGA_PIN_SUCCESS;
+}
+
+void optiga_pin_verify_time(uint8_t pin_index, uint32_t *time_ms,
+                            uint8_t *optiga_sec, uint32_t *optiga_last_time) {}
+
+bool optiga_pin_reset_hmac_counter(
+    optiga_ui_progress_t ui_progress,
+    const uint8_t hmac_reset_key[OPTIGA_PIN_SECRET_SIZE]) {
+  return true;
+}
+
+void optiga_pin_reset_hmac_counter_time(
+    uint32_t *time_ms, uint8_t *optiga_sec,
+    uint32_t *optiga_last_time_decreased_ms) {}
+
+bool optiga_pin_get_rem_v4(uint32_t *ctr) {
+  *ctr = PIN_MAX_TRIES;
+  return true;
+}
+
+bool optiga_pin_get_rem(uint32_t *ctr) {
+  *ctr = PIN_MAX_TRIES;
+  return true;
+}
+
+bool optiga_pin_decrease_rem_v4(uint32_t count) { return true; }
+
+bool optiga_pin_decrease_rem(uint32_t count) { return true; }

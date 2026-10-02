@@ -1,0 +1,56 @@
+# Project-specific configuration
+
+# Filter of the model/board defined features for this specific project
+uses = [
+    "backlight",
+    "backup_ram",
+    "ble",
+    "boot_ucb",
+    "button",
+    "consumption_mask",
+    "display",
+    "display_mono",
+    "display_rgb565",
+    "display_rgba8888",
+    "dma2d",
+    "framebuffer",
+    "haptic",
+    "hash_processor",
+    "iwdg",
+    "layout_bolt",
+    "layout_caesar",
+    "layout_delizia",
+    "layout_eckhart",
+    "lockable_bootloader",
+    "mcu_attestation",
+    "nrf",
+    "nrf_auth",
+    "power_manager",
+    "pvd",
+    "rgb_led",
+    "rtc",
+    "sdram",
+    "secmon_verification",
+    "secret",
+    "secure_aes",
+    "suspend",
+    "tamper",
+    "telemetry",
+    "touch",
+    "touch_wakeup",
+    "ui_empty_lock",
+]
+
+# ELF sections to be included in the final binary.
+# The order of sections is important.
+elf_sections = [".header", ".flash", ".data"]
+
+# xtask build options mapped to the cargo features
+[build-options]
+asan              = { true = ["asan"] }
+bootloader-devel  = { true = ["bootloader_devel"] }
+dbg-console       = { vcp = ["dbg_console_vcp"], swo = ["dbg_console_swo"], system-view = ["dbg_console_system_view"] }
+debug-link        = { true = ["debuglink", "ui_debug"] }
+disable-animation = { true = ["disable_animation"] }
+perf-overlay      = { true = ["ui_performance_overlay"] }
+production        = { true = ["production"] }

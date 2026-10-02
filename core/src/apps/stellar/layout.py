@@ -1,0 +1,831 @@
+from typing import TYPE_CHECKING
+
+import trezor.ui.layouts as layouts
+from trezor import TR, strings, wire
+from trezor.enums import ButtonRequestType, StellarSCValType
+from trezor.wire import DataError, ProcessError
+
+from apps.common.paths import address_n_to_str
+
+from .tokens import NATIVE_TOKEN, StellarToken, resolve_sep41_token
+
+if TYPE_CHECKING:
+    from buffer_types import AnyBytes
+    from collections.abc import Iterable
+
+    from trezor.enums import StellarMemoType
+    from trezor.messages import (
+        PaymentRequest,
+        StellarAsset,
+        StellarCreateContractArgsV2,
+        StellarInt128Parts,
+        StellarInt256Parts,
+        StellarInvokeContractArgs,
+        StellarSCVal,
+        StellarSCValMapEntry,
+        StellarSorobanAuthorizedInvocation,
+        StellarUInt128Parts,
+        StellarUInt256Parts,
+    )
+    from trezor.ui.layouts import StrPropertyType
+
+    from apps.common.paths import Bip32Path
+
+
+async def require_confirm_tx_source(tx_source: str) -> None:
+    await layouts.show_warning(
+        br_name="confirm_tx_source",
+        content=TR.stellar__transaction_source_diff_warning,
+        br_code=ButtonRequestType.Warning,
+    )
+
+    await layouts.confirm_address(
+        title=TR.stellar__transaction_source,
+        address=tx_source,
+        br_name="confirm_tx_source",
+        br_code=ButtonRequestType.ConfirmOutput,
+        verb=TR.buttons__continue,
+    )
+
+
+async def require_confirm_memo(memo_type: StellarMemoType, memo_text: str) -> None:
+    from trezor.enums import StellarMemoType
+
+    if memo_type == StellarMemoType.TEXT:
+        description = "Memo (TEXT)"
+    elif memo_type == StellarMemoType.ID:
+        description = "Memo (ID)"
+    elif memo_type == StellarMemoType.HASH:
+        description = "Memo (HASH)"
+    elif memo_type == StellarMemoType.RETURN:
+        description = "Memo (RETURN)"
+    else:
+        return await layouts.show_warning(
+            br_name="confirm_memo",
+            content=TR.stellar__exchanges_require_memo,
+        )
+
+    await layouts.confirm_value(
+        title=TR.stellar__confirm_memo,
+        value=memo_text,
+        description=description,
+        br_name="confirm_memo",
+        br_code=ButtonRequestType.ConfirmOutput,
+        verb=TR.buttons__continue,
+        is_data=False,
+    )
+
+
+async def require_confirm_payment_request(
+    provider_address: str,
+    verified_payment_request: PaymentRequest,
+    address_n: Bip32Path | None,
+    asset: StellarAsset,
+) -> None:
+    from trezor.ui.layouts import confirm_payment_request
+    from trezor.ui.layouts.slip24 import Refund, Trade
+
+    from apps.common.payment_request import parse_amount
+
+    total_amount = StellarToken.from_asset(asset).format(
+        parse_amount(verified_payment_request)
+    )
+
+    texts: list[tuple[str | None, str]] = []
+    refunds = []
+    trades = []
+    for memo in verified_payment_request.memos:
+        if memo.text_memo is not None:
+            texts.append((None, memo.text_memo.text))
+        elif memo.text_details_memo is not None:
+            texts.append((memo.text_details_memo.title, memo.text_details_memo.text))
+        elif memo.refund_memo:
+            refund_account_path = address_n_to_str(memo.refund_memo.address_n)
+            refunds.append(Refund(memo.refund_memo.address, None, refund_account_path))
+        elif memo.coin_purchase_memo:
+            coin_purchase_account_path = address_n_to_str(
+                memo.coin_purchase_memo.address_n
+            )
+            trades.append(
+                Trade(
+                    f"-\u00a0{total_amount}",
+                    f"+\u00a0{memo.coin_purchase_memo.amount}",
+                    memo.coin_purchase_memo.address,
+                    None,
+                    coin_purchase_account_path,
+                )
+            )
+        else:
+            raise wire.DataError("Unrecognized memo type in payment request memo.")
+
+    account_path = address_n_to_str(address_n) if address_n else None
+    account_items = []
+    if account_path:
+        account_items.append((TR.address_details__derivation_path, account_path))
+
+    await confirm_payment_request(
+        verified_payment_request.recipient_name,
+        provider_address,
+        texts,
+        refunds,
+        trades,
+        account_items,
+        None,
+        None,
+    )
+
+
+def _get_network_name(network_passphrase: str) -> str:
+    from . import consts
+
+    _KNOWN_NETWORKS = {
+        consts.NETWORK_PASSPHRASE_PUBLIC: "Mainnet",
+        consts.NETWORK_PASSPHRASE_TESTNET: "Testnet",
+        consts.NETWORK_PASSPHRASE_FUTURENET: "Futurenet",
+    }
+    return _KNOWN_NETWORKS.get(network_passphrase, f"Unknown ({network_passphrase})")
+
+
+async def confirm_tx_final(
+    address_n: list[int],
+    fee: int,
+    timebounds: tuple[int, int],
+    is_sending_from_trezor_account: bool,
+    network_passphrase: str,
+) -> None:
+    from trezor.wire import DataError
+
+    from apps.common import paths
+
+    from . import PATTERN, SLIP44_ID
+
+    timebounds_start, timebounds_end = timebounds
+    extra_items: Iterable[StrPropertyType] = (
+        (
+            TR.stellar__valid_from,
+            (
+                strings.format_timestamp(timebounds_start)
+                if timebounds_start > 0
+                else TR.stellar__no_restriction
+            ),
+            None,
+        ),
+        (
+            TR.stellar__valid_to,
+            (
+                strings.format_timestamp(timebounds_end)
+                if timebounds_end > 0
+                else TR.stellar__no_restriction
+            ),
+            None,
+        ),
+        (TR.words__network, _get_network_name(network_passphrase), None),
+    )
+
+    account_name = paths.get_account_name("Stellar", address_n, PATTERN, SLIP44_ID)
+    account_path = paths.address_n_to_str(address_n)
+
+    if account_name is None:
+        raise DataError("Stellar: Invalid account name")
+
+    await layouts.confirm_stellar_tx(
+        NATIVE_TOKEN.format(fee),  # the fee is always in XLM
+        account_name,
+        account_path,
+        is_sending_from_trezor_account,
+        extra_items,
+    )
+
+
+async def require_confirm_auth_signing_address(
+    address: str, address_n: Bip32Path
+) -> None:
+    """Confirm the device account whose key signs the Soroban authorization.
+
+    Always the first screen of the flow, like the signing address screen of
+    Ethereum's message signing flows.
+    """
+    from apps.common import paths
+
+    from . import PATTERN, SLIP44_ID
+
+    account_name = paths.get_account_name("Stellar", address_n, PATTERN, SLIP44_ID)
+    account_path = paths.address_n_to_str(address_n)
+
+    if account_name is None:
+        raise wire.DataError("Stellar: Invalid account name")
+
+    info_items: list[StrPropertyType] = [
+        (TR.words__account, account_name, None),
+        (TR.address_details__derivation_path, account_path, None),
+    ]
+
+    await layouts.confirm_address(
+        title=TR.sign_message__confirm_address,
+        address=address,
+        br_name="confirm_auth_signing_address",
+        br_code=ButtonRequestType.ConfirmOutput,
+        verb=TR.buttons__continue,
+        info_items=info_items,
+        info_title=TR.address_details__account_info,
+    )
+
+
+async def require_confirm_auth_on_behalf_of(address: str) -> None:
+    """Confirm the address whose Soroban authorization credentials are signed.
+
+    Only shown when it differs from the signing address, i.e. when the device
+    account signs on behalf of another party. e.g. a contract account of
+    which the device account is a signer.
+    """
+    await layouts.confirm_address(
+        title=TR.words__authorization,
+        address=address,
+        description=TR.stellar__on_behalf_of,
+        br_name="confirm_auth_on_behalf_of",
+        br_code=ButtonRequestType.ConfirmOutput,
+        verb=TR.buttons__continue,
+    )
+
+
+async def confirm_auth_final(
+    signature_expiration_ledger: int,
+    network_passphrase: str,
+) -> None:
+    await layouts.confirm_value(
+        title=TR.stellar__sign_authorization,
+        value=str(signature_expiration_ledger),
+        description=TR.stellar__valid_until_ledger,
+        br_name="confirm_soroban_auth",
+        br_code=ButtonRequestType.SignTx,
+        hold=True,
+        is_data=False,
+        info_items=[
+            (TR.words__network, _get_network_name(network_passphrase), None),
+        ],
+    )
+
+
+async def _confirm_invoke_contract_args(
+    args: StellarInvokeContractArgs,
+    br_name_prefix: str,
+    authorization_title: str | None = None,
+) -> None:
+    """Confirm a contract call using the generic, unparsed arguments UI.
+
+    `authorization_title` is omitted for the function invoked directly by a
+    transaction. For an authorization-tree node, it identifies the node while
+    each screen's usual title moves into its description or subtitle.
+    """
+    await layouts.confirm_address(
+        authorization_title or TR.stellar__invoke_contract,
+        args.contract_address,
+        description=TR.stellar__invoke_contract if authorization_title else None,
+        br_name=f"{br_name_prefix}_contract_address",
+    )
+    await layouts.confirm_text(
+        f"{br_name_prefix}_function",
+        authorization_title or TR.words__function,
+        args.function_name,
+        description=TR.words__function if authorization_title else None,
+    )
+    await _confirm_args(args.args, br_name_prefix, authorization_title)
+
+
+async def _confirm_args(
+    args: list[StellarSCVal],
+    br_name_prefix: str,
+    authorization_title: str | None,
+) -> None:
+    """Confirm the arguments of a call, if any, one formatted value each."""
+    if not args:
+        return
+    props = [
+        (f"{i + 1} / {len(args)}", _format_sc_val(arg), True)
+        for i, arg in enumerate(args)
+    ]
+    await layouts.confirm_properties(
+        f"{br_name_prefix}_args",
+        authorization_title or TR.words__arguments,
+        props,
+        TR.words__arguments if authorization_title else None,
+    )
+
+
+# SEP-41 token functions given a dedicated UI, see
+# https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md
+_SEP41_TRANSFER = "transfer"
+_SEP41_APPROVE = "approve"
+
+
+def _parse_sep41_transfer(
+    args: StellarInvokeContractArgs,
+) -> tuple[str, str, int] | None:
+    """Read a SEP-41 `transfer(from, to, amount)` call, or None if it is not one."""
+    if args.function_name != _SEP41_TRANSFER or len(args.args) != 3:
+        return None
+    from_address = _sc_address(args.args[0])
+    to_address = _sc_address(args.args[1])
+    amount = _sc_amount(args.args[2])
+    if from_address is None or to_address is None or amount is None:
+        return None
+    return from_address, to_address, amount
+
+
+def _parse_sep41_approve(
+    args: StellarInvokeContractArgs,
+) -> tuple[str, str, int, int] | None:
+    """Read a SEP-41 `approve(from, spender, amount, live_until_ledger)` call."""
+    if args.function_name != _SEP41_APPROVE or len(args.args) != 4:
+        return None
+    from_address = _sc_address(args.args[0])
+    spender = _sc_address(args.args[1])
+    amount = _sc_amount(args.args[2])
+    live_until_ledger = _sc_u32(args.args[3])
+    if (
+        from_address is None
+        or spender is None
+        or amount is None
+        or live_until_ledger is None
+    ):
+        return None
+    return from_address, spender, amount, live_until_ledger
+
+
+def _sc_address(val: StellarSCVal) -> str | None:
+    if val.type != StellarSCValType.SCV_ADDRESS:
+        return None
+    return val.address
+
+
+def _sc_amount(val: StellarSCVal) -> int | None:
+    """Read an amount suitable for the dedicated token UI.
+
+    Stellar Asset Contracts reject negative amounts. Custom SEP-41 contracts
+    may accept them, but we deliberately leave such calls to the raw contract
+    flow instead of presenting them as regular token operations.
+    """
+    if val.type != StellarSCValType.SCV_I128 or val.i128 is None:
+        return None
+    amount = _i128_value(val.i128)
+    if amount < 0:
+        return None
+    return amount
+
+
+def _sc_u32(val: StellarSCVal) -> int | None:
+    if val.type != StellarSCValType.SCV_U32:
+        return None
+    return val.u32
+
+
+async def confirm_invoke_contract(
+    args: StellarInvokeContractArgs,
+    network_id: AnyBytes,
+    authorizing_address: str,
+    authorization_title: str | None = None,
+) -> None:
+    """Confirm a contract call, using the dedicated token UI when possible.
+
+    `authorization_title` is omitted for the host function invoked directly by
+    a transaction; transfers then retain the standard payment-style output
+    screen. An invocation from either kind of authorization tree provides a
+    title identifying the node, and the token action becomes its subtitle.
+
+    `authorizing_address` is used in both contexts to avoid repeating the
+    address that already authorizes the transaction operation or the whole
+    authorization tree.
+    """
+    br_name_prefix = "op_invoke" if authorization_title is None else "op_auth"
+
+    token = resolve_sep41_token(args, network_id)
+    if token is not None:
+        transfer = _parse_sep41_transfer(args)
+        if transfer is not None:
+            await _confirm_sep41_transfer(
+                transfer,
+                token,
+                args.contract_address,
+                authorizing_address,
+                br_name_prefix,
+                authorization_title,
+            )
+            return
+
+        approve = _parse_sep41_approve(args)
+        if approve is not None:
+            await _confirm_sep41_approve(
+                approve,
+                token,
+                args.contract_address,
+                authorizing_address,
+                br_name_prefix,
+                authorization_title,
+            )
+            return
+
+    await _confirm_invoke_contract_args(
+        args,
+        br_name_prefix,
+        authorization_title,
+    )
+
+
+async def _confirm_sep41_transfer(
+    transfer: tuple[str, str, int],
+    token: StellarToken,
+    token_contract: str,
+    authorizing_address: str,
+    br_name_prefix: str,
+    authorization_title: str | None,
+) -> None:
+    """Confirm a parsed SEP-41 transfer using its dedicated token UI."""
+    from_address, to_address, amount = transfer
+    # Without an authorization title, this is the transaction's own action and
+    # is framed like a classic payment. A tree node instead describes what a
+    # signature permits and may belong to another party altogether, so it gets
+    # a neutral, perspective-free label, in line with "Approve token".
+    action = (
+        TR.words__send if authorization_title is None else TR.stellar__transfer_token
+    )
+    screen_title = authorization_title or action
+    # For a direct transaction, "Send" is the title and
+    # `confirm_stellar_output` supplies the recipient context. In an
+    # authorization tree, its node title is retained and the action is shown as
+    # the subtitle.
+    subtitle = "" if authorization_title is None else action
+    if from_address != authorizing_address:
+        await layouts.confirm_stellar_address(
+            screen_title,
+            subtitle,
+            from_address,
+            TR.stellar__from,
+            f"{br_name_prefix}_from",
+        )
+
+    if authorization_title is not None:
+        await layouts.confirm_stellar_address(
+            screen_title,
+            subtitle,
+            to_address,
+            TR.stellar__to,
+            f"{br_name_prefix}_to",
+        )
+        await layouts.confirm_stellar_output_amount(
+            screen_title,
+            subtitle,
+            token.format(amount),
+            token,
+            TR.words__amount,
+            token_contract=token_contract,
+        )
+    else:
+        await layouts.confirm_stellar_output(
+            to_address,
+            token.format(amount),
+            output_index=0,  # a Soroban operation is always the only one
+            token=token,
+            token_contract=token_contract,
+        )
+
+
+async def _confirm_sep41_approve(
+    approve: tuple[str, str, int, int],
+    token: StellarToken,
+    token_contract: str,
+    authorizing_address: str,
+    br_name_prefix: str,
+    authorization_title: str | None,
+) -> None:
+    """Confirm a parsed SEP-41 approval or revocation using its dedicated UI."""
+    from_address, spender, amount, live_until_ledger = approve
+    action = TR.stellar__revoke_approval if amount == 0 else TR.stellar__approve_token
+    screen_title = authorization_title or action
+    subtitle = "" if authorization_title is None else action
+    if from_address != authorizing_address:
+        await layouts.confirm_stellar_address(
+            screen_title,
+            subtitle,
+            from_address,
+            TR.stellar__from,
+            f"{br_name_prefix}_from",
+        )
+    await layouts.confirm_stellar_address(
+        screen_title,
+        subtitle,
+        spender,
+        TR.stellar__spender,
+        f"{br_name_prefix}_spender",
+    )
+    if amount == 0:
+        # "Revoke approval" already communicates the zero allowance, so
+        # identify the token instead of displaying the omitted amount.
+        display_value = token.symbol
+        value_label = TR.words__token
+    else:
+        display_value = token.format(amount)
+        value_label = TR.words__amount
+    await layouts.confirm_stellar_output_amount(
+        screen_title,
+        subtitle,
+        display_value,
+        token,
+        value_label,
+        token_contract=token_contract,
+    )
+    await layouts.confirm_stellar_valid_until(
+        screen_title,
+        subtitle,
+        live_until_ledger,
+        f"{br_name_prefix}_valid_until",
+    )
+
+
+async def confirm_create_contract(
+    args: StellarCreateContractArgsV2,
+    network_id: AnyBytes,
+    authorization_title: str | None = None,
+) -> None:
+    """Confirm the creation of a contract, i.e. a deployment.
+
+    The new contract is identified by its address, which is derived from the
+    contract ID preimage (CAP-46-02) and so commits to the deployer and salt.
+    Neither is shown on its own: in Soroban the deployer gains no rights over
+    the contract, and it has to authorize the creation anyway. Then the Wasm
+    the contract runs and the arguments of its constructor are confirmed.
+
+    `authorization_title` is used like in `confirm_invoke_contract`.
+    """
+    from trezor.enums import (
+        StellarContractExecutableType,
+        StellarContractIDPreimageType,
+    )
+
+    from .helpers import contract_address_from_address
+
+    preimage = args.contract_id_preimage
+    executable = args.executable
+    if preimage.type != StellarContractIDPreimageType.CONTRACT_ID_PREIMAGE_FROM_ADDRESS:
+        raise ProcessError("Stellar: unsupported contract ID preimage type")
+    if executable.type != StellarContractExecutableType.CONTRACT_EXECUTABLE_WASM:
+        raise ProcessError("Stellar: unsupported contract executable type")
+    if preimage.from_address is None:
+        raise DataError("Stellar: missing from_address")
+    if executable.wasm_hash is None:
+        raise DataError("Stellar: missing wasm_hash")
+
+    br_name_prefix = "op_create" if authorization_title is None else "op_auth"
+    title = authorization_title or TR.stellar__deploy_contract
+
+    await layouts.confirm_address(
+        title,
+        contract_address_from_address(
+            network_id, preimage.from_address.address, preimage.from_address.salt
+        ),
+        description=TR.stellar__deploy_contract if authorization_title else None,
+        br_name=f"{br_name_prefix}_contract_address",
+    )
+    await layouts.confirm_value(
+        title,
+        executable.wasm_hash.hex(),
+        TR.stellar__wasm_hash,
+        f"{br_name_prefix}_wasm_hash",
+        verb=TR.buttons__continue,
+    )
+    await _confirm_args(args.constructor_args, br_name_prefix, authorization_title)
+
+
+async def confirm_authorized_invocation(
+    invocation: StellarSorobanAuthorizedInvocation,
+    network_id: AnyBytes,
+    authorizing_address: str,
+) -> None:
+    """Confirm a standalone authorized invocation tree (auth entry signing).
+
+    Unlike in a transaction, there is always exactly one entry being signed, so
+    its root label is empty; sub-invocations are numbered relative to it
+    (".1", ".1.2", ...), the same paths they would have inside a transaction.
+    """
+    await confirm_invocation(invocation, "", network_id, authorizing_address)
+
+
+async def confirm_invocation(
+    invocation: StellarSorobanAuthorizedInvocation,
+    position: str,
+    network_id: AnyBytes,
+    authorizing_address: str,
+    is_root: bool = False,
+) -> None:
+    """Confirm an authorized invocation and its sub-invocations recursively.
+
+    The whole authorization tree is shown by default (it is security-critical and
+    can differ from the host function being invoked). `position` is the root
+    label plus the dot-delimited path in the auth tree (e.g. "#2", "#2.1" in a
+    transaction), or empty for the unlabeled root of a standalone authorization
+    entry (whose children are then ".1", ".1.2", ...), so a given entry's
+    children carry the same paths in both flows. `authorizing_address` belongs
+    to the whole tree and is propagated unchanged to every child.
+    """
+    from trezor.enums import StellarSorobanAuthorizedFunctionType
+
+    if position:
+        authorization_title = f"{TR.words__authorization} {position}"
+    else:
+        authorization_title = TR.words__authorization
+
+    func = invocation.function
+    if (
+        func.type
+        == StellarSorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN
+    ):
+        if func.contract_fn is None:
+            raise DataError("Stellar: missing contract_fn")
+        if not is_root:
+            await confirm_invoke_contract(
+                func.contract_fn,
+                network_id,
+                authorizing_address,
+                authorization_title=authorization_title,
+            )
+    elif (
+        func.type
+        == StellarSorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CREATE_CONTRACT_V2_HOST_FN
+    ):
+        if func.create_contract_v2_host_fn is None:
+            raise DataError("Stellar: missing create_contract_v2_host_fn")
+        if not is_root:
+            await confirm_create_contract(
+                func.create_contract_v2_host_fn,
+                network_id,
+                authorization_title=authorization_title,
+            )
+    else:
+        raise ProcessError("Stellar: unsupported authorized function type")
+
+    for i, sub in enumerate(invocation.sub_invocations):
+        await confirm_invocation(
+            sub, f"{position}.{i + 1}", network_id, authorizing_address
+        )
+
+
+def _escape_str(s: str) -> str:
+    # Escape `\` first, then `"`, so an embedded quote cannot close the surrounding
+    # string delimiters -- otherwise a string could forge extra vec/map items.
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _format_sc_val(val: StellarSCVal) -> str:
+    """Format SCVal as a human-readable string, using JSON for complex types."""
+    w = []
+    _format_sc_val_rec(val, w)
+    return "".join(w)
+
+
+def _format_sc_val_rec(val: StellarSCVal, w: list[str]) -> None:
+    from trezor.strings import format_duration, format_timestamp
+
+    t = val.type
+
+    if t == StellarSCValType.SCV_BOOL:
+        if val.b is None:
+            raise DataError("Stellar: missing bool value")
+        return w.append("true" if val.b else "false")
+    elif t == StellarSCValType.SCV_VOID:
+        return w.append("void")
+    elif t == StellarSCValType.SCV_U32:
+        if val.u32 is None:
+            raise DataError("Stellar: missing u32 value")
+        return w.append(str(val.u32))
+    elif t == StellarSCValType.SCV_I32:
+        if val.i32 is None:
+            raise DataError("Stellar: missing i32 value")
+        return w.append(str(val.i32))
+    elif t == StellarSCValType.SCV_U64:
+        if val.u64 is None:
+            raise DataError("Stellar: missing u64 value")
+        return w.append(str(val.u64))
+    elif t == StellarSCValType.SCV_I64:
+        if val.i64 is None:
+            raise DataError("Stellar: missing i64 value")
+        return w.append(str(val.i64))
+    elif t == StellarSCValType.SCV_TIMEPOINT:
+        if val.timepoint is None:
+            raise DataError("Stellar: missing timepoint value")
+        try:
+            return w.append(format_timestamp(val.timepoint))
+        except OverflowError:
+            return w.append(str(val.timepoint))
+    elif t == StellarSCValType.SCV_DURATION:
+        if val.duration is None:
+            raise DataError("Stellar: missing duration value")
+        return w.append(format_duration(val.duration))
+    elif t == StellarSCValType.SCV_U128:
+        if val.u128 is None:
+            raise DataError("Stellar: missing u128 value")
+        return w.append(_format_u128(val.u128))
+    elif t == StellarSCValType.SCV_I128:
+        if val.i128 is None:
+            raise DataError("Stellar: missing i128 value")
+        return w.append(_format_i128(val.i128))
+    elif t == StellarSCValType.SCV_U256:
+        if val.u256 is None:
+            raise DataError("Stellar: missing u256 value")
+        return w.append(_format_u256(val.u256))
+    elif t == StellarSCValType.SCV_I256:
+        if val.i256 is None:
+            raise DataError("Stellar: missing i256 value")
+        return w.append(_format_i256(val.i256))
+    elif t == StellarSCValType.SCV_BYTES:
+        if val.bytes is None:
+            raise DataError("Stellar: missing bytes value")
+        return w.append("0x" + val.bytes.hex())
+    elif t == StellarSCValType.SCV_STRING:
+        if val.string is None:
+            raise DataError("Stellar: missing string value")
+        # Render decoded text as a quoted, escaped string so its content can never
+        # forge the surrounding quotes (and thus the vec/map separators). Non-UTF-8
+        # bytes can't be shown as text, so render them as hex like SCV_BYTES.
+        try:
+            return w.append(f'"{_escape_str(bytes(val.string).decode())}"')
+        except UnicodeError:
+            return w.append("0x" + val.string.hex())
+    elif t == StellarSCValType.SCV_SYMBOL:
+        if val.symbol is None:
+            raise DataError("Stellar: missing symbol value")
+        # Quote and escape like SCV_STRING so the symbol's content can never forge the
+        # surrounding vec/map delimiters. A symbol is already a valid UTF-8 str, so no
+        # hex fallback is needed (unlike SCV_STRING, which holds raw bytes).
+        return w.append(f'"{_escape_str(val.symbol)}"')
+    elif t == StellarSCValType.SCV_VEC:
+        return _format_vec_as_json(val.vec, w)
+    elif t == StellarSCValType.SCV_MAP:
+        return _format_map_as_json(val.map, w)
+    elif t == StellarSCValType.SCV_ADDRESS:
+        if val.address is None:
+            raise DataError("Stellar: missing address value")
+        return w.append(val.address)
+    else:
+        raise DataError(f"Stellar: unsupported SCVal type {t}")
+
+
+def _format_vec_as_json(vec: list[StellarSCVal], w: list[str]) -> None:
+    """Format a vector as JSON array."""
+    w.append("[")
+    for i, item in enumerate(vec):
+        if i > 0:
+            w.append(", ")
+        _format_sc_val_rec(item, w)
+    w.append("]")
+
+
+def _format_map_as_json(map_entries: list[StellarSCValMapEntry], w: list[str]) -> None:
+    """Format a map as JSON object."""
+    w.append("{")
+    for i, entry in enumerate(map_entries):
+        if i > 0:
+            w.append(", ")
+        _format_sc_val_rec(entry.key, w)
+        w.append(": ")
+        _format_sc_val_rec(entry.value, w)
+    w.append("}")
+
+
+_MASK64 = 0xFFFF_FFFF_FFFF_FFFF
+
+
+def _format_u128(parts: StellarUInt128Parts) -> str:
+    value = ((parts.hi & _MASK64) << 64) | (parts.lo & _MASK64)
+    return str(value)
+
+
+def _i128_value(parts: StellarInt128Parts) -> int:
+    value = ((parts.hi & _MASK64) << 64) | (parts.lo & _MASK64)
+    if parts.hi < 0:
+        value -= 1 << 128
+    return value
+
+
+def _format_i128(parts: StellarInt128Parts) -> str:
+    return str(_i128_value(parts))
+
+
+def _format_u256(parts: StellarUInt256Parts) -> str:
+    value = (
+        ((parts.hi_hi & _MASK64) << 192)
+        | ((parts.hi_lo & _MASK64) << 128)
+        | ((parts.lo_hi & _MASK64) << 64)
+        | (parts.lo_lo & _MASK64)
+    )
+    return str(value)
+
+
+def _format_i256(parts: StellarInt256Parts) -> str:
+    value = (
+        ((parts.hi_hi & _MASK64) << 192)
+        | ((parts.hi_lo & _MASK64) << 128)
+        | ((parts.lo_hi & _MASK64) << 64)
+        | (parts.lo_lo & _MASK64)
+    )
+    if parts.hi_hi < 0:
+        value -= 1 << 256
+    return str(value)

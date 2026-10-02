@@ -1,0 +1,24 @@
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trezor.messages import EthereumGetPublicKey, EthereumPublicKey
+
+
+async def get_public_key(msg: EthereumGetPublicKey) -> EthereumPublicKey:
+    from trezor.messages import EthereumPublicKey, GetPublicKey
+    from trezor.ui.layouts import show_pubkey
+
+    from apps.bitcoin import get_public_key as bitcoin_get_public_key
+
+    # we use the Bitcoin format for Ethereum xpubs
+    # it calls lock_manager.touch_idle_timer_if_ble() so we don't have to
+    btc_pubkey_msg = GetPublicKey(address_n=msg.address_n)
+    resp = await bitcoin_get_public_key.get_public_key(btc_pubkey_msg)
+
+    if msg.show_display:
+        from apps.common.paths import address_n_to_str
+
+        path = address_n_to_str(msg.address_n)
+        await show_pubkey(resp.node.public_key.hex(), path=path)
+
+    return EthereumPublicKey(node=resp.node, xpub=resp.xpub)

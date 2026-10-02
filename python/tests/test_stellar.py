@@ -1,0 +1,1508 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import warnings
+
+import pytest
+
+try:
+    from stellar_sdk import (
+        Account,
+        Address,
+        Asset,
+        AuthorizationFlag,
+        InvokeHostFunction,
+        MuxedAccount,
+        Network,
+        TransactionBuilder,
+        TrustLineEntryFlag,
+        scval,
+    )
+    from stellar_sdk import xdr as stellar_xdr
+    from stellar_sdk.strkey import StrKey
+except ImportError:
+    pytest.skip("stellar_sdk not installed", allow_module_level=True)
+
+from trezorlib import messages
+from trezorlib.stellar_sdk_helpers import (
+    HAVE_STELLAR_SDK_PROTOCOL_27,
+    from_authorization_entry,
+    from_envelope,
+)
+
+TX_SOURCE = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+SEQUENCE = 123456
+TIMEBOUNDS_START = 461535181
+TIMEBOUNDS_END = 1575234180
+BASE_FEE = 200
+
+
+def make_default_tx(default_op: bool = False, **kwargs) -> TransactionBuilder:
+    source_account = Account(account=TX_SOURCE, sequence=SEQUENCE)
+    default_params = {
+        "source_account": source_account,
+        "network_passphrase": Network.TESTNET_NETWORK_PASSPHRASE,
+        "base_fee": BASE_FEE,
+    }
+    default_params.update(kwargs)
+    builder = TransactionBuilder(**default_params)
+    builder.add_time_bounds(TIMEBOUNDS_START, TIMEBOUNDS_END)
+
+    if default_op:
+        builder.append_manage_data_op(data_name="Trezor", data_value=b"Hello, Stellar")
+
+    return builder
+
+
+def test_simple():
+    envelope = make_default_tx(default_op=True).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert tx.source_account == TX_SOURCE
+    assert tx.fee == envelope.transaction.fee
+    assert tx.sequence_number == SEQUENCE + 1
+    assert tx.timebounds_start is TIMEBOUNDS_START
+    assert tx.timebounds_end is TIMEBOUNDS_END
+    assert tx.memo_type == messages.StellarMemoType.NONE
+    assert tx.memo_text is None
+    assert tx.memo_id is None
+    assert tx.memo_hash is None
+    assert len(operations) == 1
+
+
+def test_memo_text():
+    memo_text = "Have a nice day!"
+    envelope = (
+        make_default_tx(default_op=True).add_text_memo(memo_text.encode()).build()
+    )
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert tx.memo_type == messages.StellarMemoType.TEXT
+    assert tx.memo_text == memo_text
+    assert tx.memo_id is None
+    assert tx.memo_hash is None
+
+
+def test_memo_id():
+    memo_id = 123456789
+    envelope = make_default_tx(default_op=True).add_id_memo(memo_id).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert tx.memo_type == messages.StellarMemoType.ID
+    assert tx.memo_text is None
+    assert tx.memo_id == memo_id
+    assert tx.memo_hash is None
+
+
+def test_memo_hash():
+    memo_hash = "b77cd735095e1b58da2d7415c1f51f423a722b34d7d5002d8896608a9130a74b"
+    envelope = (
+        make_default_tx(v1=False, default_op=True).add_hash_memo(memo_hash).build()
+    )
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert tx.memo_type == messages.StellarMemoType.HASH
+    assert tx.memo_text is None
+    assert tx.memo_id is None
+    assert tx.memo_hash.hex() == memo_hash
+
+
+def test_memo_return_hash():
+    memo_return = "b77cd735095e1b58da2d7415c1f51f423a722b34d7d5002d8896608a9130a74b"
+    envelope = (
+        make_default_tx(v1=False, default_op=True)
+        .add_return_hash_memo(memo_return)
+        .build()
+    )
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert tx.memo_type == messages.StellarMemoType.RETURN
+    assert tx.memo_text is None
+    assert tx.memo_id is None
+    assert tx.memo_hash.hex() == memo_return
+
+
+def test_time_bounds_missing():
+    tx = make_default_tx(default_op=True)
+    tx.time_bounds = None
+    with warnings.catch_warnings():
+        # ignore warning about missing time bounds
+        warnings.filterwarnings("ignore", message=r".*TimeBounds.*")
+        envelope = tx.build()
+
+    with pytest.raises(ValueError):
+        from_envelope(envelope)
+
+
+def test_multiple_operations():
+    tx = make_default_tx()
+    data_name = "Trezor"
+    data_value = b"Hello, Stellar"
+    operation1_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    amount = "50.0111"
+    asset_code = "XLM"
+    asset_issuer = None
+    operation2_source = "GBHWKBPP3O4H2BUUKSFXE4PK5WHLQYVZIZUNUJ4AU5VUZZEVBDMXISAS"
+
+    envelope = (
+        tx.append_manage_data_op(
+            data_name=data_name, data_value=data_value, source=operation1_source
+        )
+        .append_payment_op(
+            destination=destination,
+            amount=amount,
+            asset=Asset(asset_code, asset_issuer),
+            source=operation2_source,
+        )
+        .build()
+    )
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert tx.source_account == TX_SOURCE
+    assert tx.fee == envelope.transaction.fee
+    assert tx.sequence_number == SEQUENCE + 1
+    assert tx.timebounds_start is TIMEBOUNDS_START
+    assert tx.timebounds_end is TIMEBOUNDS_END
+    assert tx.memo_type == messages.StellarMemoType.NONE
+    assert tx.memo_text is None
+    assert tx.memo_id is None
+    assert tx.memo_hash is None
+    assert len(operations) == 2
+
+    assert isinstance(operations[0], messages.StellarManageDataOp)
+    assert operations[0].source_account == operation1_source
+    assert operations[0].key == data_name
+    assert operations[0].value == data_value
+
+    assert isinstance(operations[1], messages.StellarPaymentOp)
+    assert operations[1].source_account == operation2_source
+    assert operations[1].destination_account == destination
+    assert operations[1].asset.type == messages.StellarAssetType.NATIVE
+    assert operations[1].asset.code is None
+    assert operations[1].asset.issuer is None
+    assert operations[1].amount == 500111000
+
+
+def test_create_account():
+    tx = make_default_tx()
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    starting_balance = "100.0333"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_create_account_op(
+        destination=destination,
+        starting_balance=starting_balance,
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarCreateAccountOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].new_account == destination
+    assert operations[0].starting_balance == 1000333000
+
+
+def test_payment_native_asset():
+    tx = make_default_tx()
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    amount = "50.0111"
+    asset_code = "XLM"
+    asset_issuer = None
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_payment_op(
+        destination=destination,
+        amount=amount,
+        asset=Asset(asset_code, asset_issuer),
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarPaymentOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].destination_account == destination
+    assert operations[0].asset.type == messages.StellarAssetType.NATIVE
+    assert operations[0].asset.code is None
+    assert operations[0].asset.issuer is None
+    assert operations[0].amount == 500111000
+
+
+def test_payment_alpha4_asset():
+    tx = make_default_tx()
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    amount = "50.0111"
+    asset_code = "USD"
+    asset_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_payment_op(
+        destination=destination,
+        amount=amount,
+        asset=Asset(asset_code, asset_issuer),
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarPaymentOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].destination_account == destination
+    assert operations[0].asset.type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].asset.code == asset_code
+    assert operations[0].asset.issuer == asset_issuer
+    assert operations[0].amount == 500111000
+
+
+def test_payment_alpha12_asset():
+    tx = make_default_tx()
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    amount = "50.0111"
+    asset_code = "BANANA"
+    asset_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_payment_op(
+        destination=destination,
+        amount=amount,
+        asset=Asset(asset_code, asset_issuer),
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarPaymentOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].destination_account == destination
+    assert operations[0].asset.type == messages.StellarAssetType.ALPHANUM12
+    assert operations[0].asset.code == asset_code
+    assert operations[0].asset.issuer == asset_issuer
+    assert operations[0].amount == 500111000
+
+
+def test_path_payment_strict_receive():
+    tx = make_default_tx()
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    send_max = "50.0111"
+    dest_amount = "100"
+    send_code = "XLM"
+    send_issuer = None
+    dest_code = "USD"
+    dest_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+    path_asset1 = Asset(
+        "JPY", "GD6PV7DXQJX7AGVXFQ2MTCLTCH6LR3E6IO2EO2YDZD7F7IOZZCCB5DSQ"
+    )
+    path_asset2 = Asset(
+        "BANANA", "GC7EKO37HNSKQ3V6RZ274EO7SFOWASQRHLX3OR5FIZK6UMV6LIEDXHGZ"
+    )
+
+    envelope = tx.append_path_payment_strict_receive_op(
+        destination=destination,
+        send_asset=Asset(send_code, send_issuer),
+        send_max=send_max,
+        dest_asset=Asset(dest_code, dest_issuer),
+        dest_amount=dest_amount,
+        path=[path_asset1, path_asset2],
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+
+    assert isinstance(operations[0], messages.StellarPathPaymentStrictReceiveOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].destination_account == destination
+    assert operations[0].send_asset.type == messages.StellarAssetType.NATIVE
+    assert operations[0].send_max == 500111000
+    assert operations[0].destination_amount == 1000000000
+    assert operations[0].destination_asset.type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].destination_asset.code == dest_code
+    assert operations[0].destination_asset.issuer == dest_issuer
+    assert len(operations[0].paths) == 2
+    assert operations[0].paths[0].type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].paths[0].code == path_asset1.code
+    assert operations[0].paths[0].issuer == path_asset1.issuer
+    assert operations[0].paths[1].type == messages.StellarAssetType.ALPHANUM12
+    assert operations[0].paths[1].code == path_asset2.code
+    assert operations[0].paths[1].issuer == path_asset2.issuer
+
+
+def test_manage_sell_offer_new_offer():
+    tx = make_default_tx()
+    price = "0.5"
+    amount = "50.0111"
+    selling_code = "XLM"
+    selling_issuer = None
+    buying_code = "USD"
+    buying_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_manage_sell_offer_op(
+        selling=Asset(selling_code, selling_issuer),
+        buying=Asset(buying_code, buying_issuer),
+        amount=amount,
+        price=price,
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarManageSellOfferOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].selling_asset.type == messages.StellarAssetType.NATIVE
+    assert operations[0].buying_asset.type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].buying_asset.code == buying_code
+    assert operations[0].buying_asset.issuer == buying_issuer
+    assert operations[0].amount == 500111000
+    assert operations[0].price_n == 1
+    assert operations[0].price_d == 2
+    assert operations[0].offer_id == 0  # indicates a new offer
+
+
+def test_manage_sell_offer_update_offer():
+    tx = make_default_tx()
+    price = "0.5"
+    amount = "50.0111"
+    selling_code = "XLM"
+    selling_issuer = None
+    buying_code = "USD"
+    buying_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    offer_id = 12345
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_manage_sell_offer_op(
+        selling=Asset(selling_code, selling_issuer),
+        buying=Asset(buying_code, buying_issuer),
+        amount=amount,
+        price=price,
+        offer_id=offer_id,
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarManageSellOfferOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].selling_asset.type == messages.StellarAssetType.NATIVE
+    assert operations[0].buying_asset.type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].buying_asset.code == buying_code
+    assert operations[0].buying_asset.issuer == buying_issuer
+    assert operations[0].amount == 500111000
+    assert operations[0].price_n == 1
+    assert operations[0].price_d == 2
+    assert operations[0].offer_id == offer_id
+
+
+def test_create_passive_sell_offer():
+    tx = make_default_tx()
+    price = "0.5"
+    amount = "50.0111"
+    selling_code = "XLM"
+    selling_issuer = None
+    buying_code = "USD"
+    buying_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_create_passive_sell_offer_op(
+        selling=Asset(selling_code, selling_issuer),
+        buying=Asset(buying_code, buying_issuer),
+        amount=amount,
+        price=price,
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarCreatePassiveSellOfferOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].selling_asset.type == messages.StellarAssetType.NATIVE
+    assert operations[0].buying_asset.type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].buying_asset.code == buying_code
+    assert operations[0].buying_asset.issuer == buying_issuer
+    assert operations[0].amount == 500111000
+    assert operations[0].price_n == 1
+    assert operations[0].price_d == 2
+
+
+def test_set_options():
+    tx = make_default_tx()
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+    inflation_dest = "GAXN7HZQTHIPW7N2HGPAXMR42LPJ5VLYXMCCOX4D3JC4CQZGID3UYUPF"
+    clear_flags = AuthorizationFlag.AUTHORIZATION_REQUIRED
+    set_flags = (
+        AuthorizationFlag.AUTHORIZATION_IMMUTABLE
+        | AuthorizationFlag.AUTHORIZATION_REVOCABLE
+    )
+    master_weight = 255
+    low_threshold = 10
+    med_threshold = 20
+    high_threshold = 30
+    home_domain = "example.com"
+
+    envelope = tx.append_set_options_op(
+        inflation_dest=inflation_dest,
+        clear_flags=clear_flags,
+        set_flags=set_flags,
+        master_weight=master_weight,
+        low_threshold=low_threshold,
+        med_threshold=med_threshold,
+        high_threshold=high_threshold,
+        home_domain=home_domain,
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarSetOptionsOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].inflation_destination_account == inflation_dest
+    assert operations[0].clear_flags == clear_flags
+    assert operations[0].set_flags == set_flags
+    assert operations[0].master_weight == master_weight
+    assert operations[0].low_threshold == low_threshold
+    assert operations[0].medium_threshold == med_threshold
+    assert operations[0].high_threshold == high_threshold
+    assert operations[0].home_domain == home_domain
+    assert operations[0].signer_type is None
+    assert operations[0].signer_key is None
+    assert operations[0].signer_weight is None
+
+
+def test_set_options_ed25519_signer():
+    tx = make_default_tx()
+    signer = "GAXN7HZQTHIPW7N2HGPAXMR42LPJ5VLYXMCCOX4D3JC4CQZGID3UYUPF"
+    weight = 10
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_ed25519_public_key_signer(
+        account_id=signer, weight=weight, source=operation_source
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarSetOptionsOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].inflation_destination_account is None
+    assert operations[0].clear_flags is None
+    assert operations[0].set_flags is None
+    assert operations[0].master_weight is None
+    assert operations[0].low_threshold is None
+    assert operations[0].medium_threshold is None
+    assert operations[0].high_threshold is None
+    assert operations[0].home_domain is None
+    assert operations[0].signer_type == messages.StellarSignerType.ACCOUNT
+    assert operations[0].signer_key == StrKey.decode_ed25519_public_key(signer)
+    assert operations[0].signer_weight == weight
+
+
+def test_set_options_pre_auth_tx_signer():
+    tx = make_default_tx()
+    signer = bytes.fromhex(
+        "2db4b22ca018119c5027a80578813ffcf582cda4aa9e31cd92b43cfa4fc5a000"
+    )
+    weight = 30
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_pre_auth_tx_signer(
+        pre_auth_tx_hash=signer, weight=weight, source=operation_source
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarSetOptionsOp)
+    assert operations[0].signer_type == messages.StellarSignerType.PRE_AUTH
+    assert operations[0].signer_key == signer
+    assert operations[0].signer_weight == weight
+
+
+def test_set_options_hashx_signer():
+    tx = make_default_tx()
+    signer = bytes.fromhex(
+        "3389e9f0f1a65f19736cacf544c2e825313e8447f569233bb8db39aa607c8000"
+    )
+    weight = 20
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_hashx_signer(
+        sha256_hash=signer, weight=weight, source=operation_source
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarSetOptionsOp)
+    assert operations[0].signer_type == messages.StellarSignerType.HASH
+    assert operations[0].signer_key == signer
+    assert operations[0].signer_weight == weight
+
+
+def test_change_trust():
+    tx = make_default_tx()
+    asset_code = "USD"
+    asset_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    limit = "1000"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_change_trust_op(
+        asset=Asset(asset_code, asset_issuer),
+        limit=limit,
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarChangeTrustOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].asset.type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].asset.code == asset_code
+    assert operations[0].asset.issuer == asset_issuer
+    assert operations[0].limit == 10000000000
+
+
+def test_allow_trust():
+    tx = make_default_tx()
+    asset_code = "USD"
+    trustor = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    with warnings.catch_warnings():
+        # ignore warnings about append_trust_line_flags being a deprecated op,
+        # Trezor doesn't currently support the alternative
+        warnings.filterwarnings("ignore", message=r".*append_set_trust_line_flags_op.*")
+        warnings.filterwarnings("ignore", message=r".*SetTrustLineFlags.*")
+        envelope = tx.append_allow_trust_op(
+            trustor=trustor,
+            asset_code=asset_code,
+            authorize=TrustLineEntryFlag.AUTHORIZED_FLAG,
+            source=operation_source,
+        ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarAllowTrustOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].asset_type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].asset_code == asset_code
+    assert operations[0].trusted_account == trustor
+    assert operations[0].is_authorized is True
+
+
+def test_account_merge():
+    tx = make_default_tx()
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_account_merge_op(
+        destination=destination, source=operation_source
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarAccountMergeOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].destination_account == destination
+
+
+def test_manage_data():
+    tx = make_default_tx()
+    data_name = "Trezor"
+    data_value = b"Hello, Stellar"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_manage_data_op(
+        data_name=data_name, data_value=data_value, source=operation_source
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarManageDataOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].key == data_name
+    assert operations[0].value == data_value
+
+
+def test_manage_data_remove_data_entity():
+    tx = make_default_tx()
+    data_name = "Trezor"
+    data_value = None  # remove data entity
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_manage_data_op(
+        data_name=data_name, data_value=data_value, source=operation_source
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarManageDataOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].key == data_name
+    assert operations[0].value is None
+
+
+def test_bump_sequence():
+    tx = make_default_tx()
+    bump_to = 143487250972278900
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_bump_sequence_op(
+        bump_to=bump_to, source=operation_source
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarBumpSequenceOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].bump_to == bump_to
+
+
+def test_manage_buy_offer_new_offer():
+    tx = make_default_tx()
+    price = "0.5"
+    amount = "50.0111"
+    selling_code = "XLM"
+    selling_issuer = None
+    buying_code = "USD"
+    buying_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_manage_buy_offer_op(
+        selling=Asset(selling_code, selling_issuer),
+        buying=Asset(buying_code, buying_issuer),
+        amount=amount,
+        price=price,
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarManageBuyOfferOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].selling_asset.type == messages.StellarAssetType.NATIVE
+    assert operations[0].buying_asset.type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].buying_asset.code == buying_code
+    assert operations[0].buying_asset.issuer == buying_issuer
+    assert operations[0].amount == 500111000
+    assert operations[0].price_n == 1
+    assert operations[0].price_d == 2
+    assert operations[0].offer_id == 0  # indicates a new offer
+
+
+def test_manage_buy_offer_update_offer():
+    tx = make_default_tx()
+    price = "0.5"
+    amount = "50.0111"
+    selling_code = "XLM"
+    selling_issuer = None
+    buying_code = "USD"
+    buying_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    offer_id = 12345
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_manage_buy_offer_op(
+        selling=Asset(selling_code, selling_issuer),
+        buying=Asset(buying_code, buying_issuer),
+        amount=amount,
+        price=price,
+        offer_id=offer_id,
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarManageBuyOfferOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].selling_asset.type == messages.StellarAssetType.NATIVE
+    assert operations[0].buying_asset.type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].buying_asset.code == buying_code
+    assert operations[0].buying_asset.issuer == buying_issuer
+    assert operations[0].amount == 500111000
+    assert operations[0].price_n == 1
+    assert operations[0].price_d == 2
+    assert operations[0].offer_id == offer_id
+
+
+def test_path_payment_strict_send():
+    tx = make_default_tx()
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    send_amount = "50.0112"
+    dest_min = "120"
+    send_code = "XLM"
+    send_issuer = None
+    dest_code = "USD"
+    dest_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+    path_asset1 = Asset(
+        "JPY", "GD6PV7DXQJX7AGVXFQ2MTCLTCH6LR3E6IO2EO2YDZD7F7IOZZCCB5DSQ"
+    )
+    path_asset2 = Asset(
+        "BANANA", "GC7EKO37HNSKQ3V6RZ274EO7SFOWASQRHLX3OR5FIZK6UMV6LIEDXHGZ"
+    )
+
+    envelope = tx.append_path_payment_strict_send_op(
+        destination=destination,
+        send_asset=Asset(send_code, send_issuer),
+        send_amount=send_amount,
+        dest_asset=Asset(dest_code, dest_issuer),
+        dest_min=dest_min,
+        path=[path_asset1, path_asset2],
+        source=operation_source,
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+
+    assert isinstance(operations[0], messages.StellarPathPaymentStrictSendOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].destination_account == destination
+    assert operations[0].send_asset.type == messages.StellarAssetType.NATIVE
+    assert operations[0].send_amount == 500112000
+    assert operations[0].destination_min == 1200000000
+    assert operations[0].destination_asset.type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].destination_asset.code == dest_code
+    assert operations[0].destination_asset.issuer == dest_issuer
+    assert len(operations[0].paths) == 2
+    assert operations[0].paths[0].type == messages.StellarAssetType.ALPHANUM4
+    assert operations[0].paths[0].code == path_asset1.code
+    assert operations[0].paths[0].issuer == path_asset1.issuer
+    assert operations[0].paths[1].type == messages.StellarAssetType.ALPHANUM12
+    assert operations[0].paths[1].code == path_asset2.code
+    assert operations[0].paths[1].issuer == path_asset2.issuer
+
+
+def test_payment_muxed_account_not_support_raise():
+    tx = make_default_tx()
+    destination = MuxedAccount(
+        "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6", 1
+    )
+    amount = "50.0111"
+    asset_code = "XLM"
+    asset_issuer = None
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_payment_op(
+        destination=destination,
+        amount=amount,
+        asset=Asset(asset_code, asset_issuer),
+        source=operation_source,
+    ).build()
+
+    with pytest.raises(ValueError, match="MuxedAccount is not supported"):
+        from_envelope(envelope)
+
+
+def test_path_payment_strict_send_muxed_account_not_support_raise():
+    tx = make_default_tx()
+    destination = MuxedAccount(
+        "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6", 1
+    )
+    send_amount = "50.0112"
+    dest_min = "120"
+    send_code = "XLM"
+    send_issuer = None
+    dest_code = "USD"
+    dest_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+    path_asset1 = Asset(
+        "JPY", "GD6PV7DXQJX7AGVXFQ2MTCLTCH6LR3E6IO2EO2YDZD7F7IOZZCCB5DSQ"
+    )
+    path_asset2 = Asset(
+        "BANANA", "GC7EKO37HNSKQ3V6RZ274EO7SFOWASQRHLX3OR5FIZK6UMV6LIEDXHGZ"
+    )
+
+    envelope = tx.append_path_payment_strict_send_op(
+        destination=destination,
+        send_asset=Asset(send_code, send_issuer),
+        send_amount=send_amount,
+        dest_asset=Asset(dest_code, dest_issuer),
+        dest_min=dest_min,
+        path=[path_asset1, path_asset2],
+        source=operation_source,
+    ).build()
+
+    with pytest.raises(ValueError, match="MuxedAccount is not supported"):
+        from_envelope(envelope)
+
+
+def test_path_payment_strict_receive_muxed_account_not_support_raise():
+    tx = make_default_tx()
+    destination = MuxedAccount(
+        "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6", 1
+    )
+    send_max = "50.0111"
+    dest_amount = "100"
+    send_code = "XLM"
+    send_issuer = None
+    dest_code = "USD"
+    dest_issuer = "GCSJ7MFIIGIRMAS4R3VT5FIFIAOXNMGDI5HPYTWS5X7HH74FSJ6STSGF"
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+    path_asset1 = Asset(
+        "JPY", "GD6PV7DXQJX7AGVXFQ2MTCLTCH6LR3E6IO2EO2YDZD7F7IOZZCCB5DSQ"
+    )
+    path_asset2 = Asset(
+        "BANANA", "GC7EKO37HNSKQ3V6RZ274EO7SFOWASQRHLX3OR5FIZK6UMV6LIEDXHGZ"
+    )
+
+    envelope = tx.append_path_payment_strict_receive_op(
+        destination=destination,
+        send_asset=Asset(send_code, send_issuer),
+        send_max=send_max,
+        dest_asset=Asset(dest_code, dest_issuer),
+        dest_amount=dest_amount,
+        path=[path_asset1, path_asset2],
+        source=operation_source,
+    ).build()
+
+    with pytest.raises(ValueError, match="MuxedAccount is not supported"):
+        from_envelope(envelope)
+
+
+def test_account_merge_muxed_account_not_support_raise():
+    tx = make_default_tx()
+    destination = MuxedAccount(
+        "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6", 1
+    )
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_account_merge_op(
+        destination=destination, source=operation_source
+    ).build()
+
+    with pytest.raises(ValueError, match="MuxedAccount is not supported"):
+        from_envelope(envelope)
+
+
+def test_op_source_muxed_account_not_support_raise():
+    tx = make_default_tx()
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    amount = "50.0111"
+    asset_code = "XLM"
+    asset_issuer = None
+    operation_source = MuxedAccount(
+        "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V", 2
+    )
+
+    envelope = tx.append_payment_op(
+        destination=destination,
+        amount=amount,
+        asset=Asset(asset_code, asset_issuer),
+        source=operation_source,
+    ).build()
+
+    with pytest.raises(ValueError, match="MuxedAccount is not supported"):
+        from_envelope(envelope)
+
+
+def test_tx_source_muxed_account_not_support_raise():
+    source_account = Account(account=MuxedAccount(TX_SOURCE, 123456), sequence=SEQUENCE)
+    destination = "GDNSSYSCSSJ76FER5WEEXME5G4MTCUBKDRQSKOYP36KUKVDB2VCMERS6"
+    amount = "50.0111"
+    asset_code = "XLM"
+    asset_issuer = None
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = (
+        TransactionBuilder(
+            source_account=source_account,
+            network_passphrase=Network.TESTNET_NETWORK_PASSPHRASE,
+            base_fee=BASE_FEE,
+        )
+        .add_time_bounds(TIMEBOUNDS_START, TIMEBOUNDS_END)
+        .append_payment_op(
+            destination=destination,
+            amount=amount,
+            asset=Asset(asset_code, asset_issuer),
+            source=operation_source,
+        )
+        .build()
+    )
+
+    with pytest.raises(ValueError, match="MuxedAccount is not supported"):
+        from_envelope(envelope)
+
+
+def test_claim_claimable_balance():
+    tx = make_default_tx()
+    balance_id = (
+        "00000000178826fbfe339e1f5c53417c6fedfe2c05e8bec14303143ec46b38981b09c3f9"
+    )
+    operation_source = "GAEB4MRKRCONK4J7MVQXAHTNDPAECUCCCNE7YC5CKM34U3OJ673A4D6V"
+
+    envelope = tx.append_claim_claimable_balance_op(
+        balance_id=balance_id, source=operation_source
+    ).build()
+
+    tx, operations, ext = from_envelope(envelope)
+    assert ext == messages.StellarTxExt(v=0)
+    assert len(operations) == 1
+    assert isinstance(operations[0], messages.StellarClaimClaimableBalanceOp)
+    assert operations[0].source_account == operation_source
+    assert operations[0].balance_id == bytes.fromhex(balance_id)
+
+
+SOROBAN_SOURCE = "GAXSFOOGF4ELO5HT5PTN23T5XE6D5QWL3YBHSVQ2HWOFEJNYYMRJENBV"
+SOROBAN_CONTRACT = "CABQUEIYD4TC2NB3IJEVAV26MVWHG6UBRCHZNHNEVOZLTQGHZ3K5ZIRI"
+SOROBAN_DESTINATION = "GBOVKZBEM2YYLOCDCUXJ4IMRKHN4LCJAE7WEAEA2KF562XFAGDBOB64V"
+SOROBAN_DELEGATE = "GCRW4NZ45MPVTYRD6MV4EOT2WB4BIWLENHREU2BQLFF3DL4IPH36NBDL"
+
+# A real asset, so the address of its Stellar Asset Contract can be derived
+# (CAP-46-2) and asset hints matched against invocations of that contract.
+SAC_ASSET = Asset("USDC", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5")
+SAC_ADDRESS = SAC_ASSET.contract_id(Network.TESTNET_NETWORK_PASSPHRASE)
+SAC_ASSET_HINT = messages.StellarAsset(
+    type=messages.StellarAssetType.ALPHANUM4,
+    code=SAC_ASSET.code,
+    issuer=SAC_ASSET.issuer,
+)
+UNRELATED_ASSET = Asset(
+    "USDX", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+)
+NATIVE_SAC_ADDRESS = Asset.native().contract_id(Network.TESTNET_NETWORK_PASSPHRASE)
+NATIVE_ASSET_HINT = messages.StellarAsset(type=messages.StellarAssetType.NATIVE)
+
+skip_if_no_protocol_27 = pytest.mark.skipif(
+    not HAVE_STELLAR_SDK_PROTOCOL_27,
+    reason="requires Stellar SDK with Protocol 27 support",
+)
+
+
+def make_soroban_invocation(
+    function_name="transfer",
+    amount=500_111_000,
+    sub_invocations=(),
+    contract_address=SOROBAN_CONTRACT,
+):
+    return stellar_xdr.SorobanAuthorizedInvocation(
+        function=stellar_xdr.SorobanAuthorizedFunction(
+            type=stellar_xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN,
+            contract_fn=stellar_xdr.InvokeContractArgs(
+                contract_address=Address(contract_address).to_xdr_sc_address(),
+                function_name=stellar_xdr.SCSymbol(function_name.encode()),
+                args=[
+                    scval.to_address(SOROBAN_SOURCE),
+                    scval.to_address(SOROBAN_DESTINATION),
+                    scval.to_int128(amount),
+                ],
+            ),
+        ),
+        sub_invocations=list(sub_invocations),
+    )
+
+
+def expected_invocation(function_name, amount, sub_invocations=()):
+    return messages.StellarSorobanAuthorizedInvocation(
+        function=messages.StellarSorobanAuthorizedFunction(
+            type=messages.StellarSorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN,
+            contract_fn=messages.StellarInvokeContractArgs(
+                contract_address=SOROBAN_CONTRACT,
+                function_name=function_name,
+                args=[
+                    messages.StellarSCVal(
+                        type=messages.StellarSCValType.SCV_ADDRESS,
+                        address=SOROBAN_SOURCE,
+                    ),
+                    messages.StellarSCVal(
+                        type=messages.StellarSCValType.SCV_ADDRESS,
+                        address=SOROBAN_DESTINATION,
+                    ),
+                    messages.StellarSCVal(
+                        type=messages.StellarSCValType.SCV_I128,
+                        i128=messages.StellarInt128Parts(hi=0, lo=amount),
+                    ),
+                ],
+            ),
+        ),
+        sub_invocations=list(sub_invocations),
+    )
+
+
+def make_authorization_entry(
+    address, nonce, signature_expiration_ledger, signature=None, sub_invocations=()
+):
+    return stellar_xdr.SorobanAuthorizationEntry(
+        credentials=stellar_xdr.SorobanCredentials(
+            type=stellar_xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS_V2,
+            address_v2=stellar_xdr.SorobanAddressCredentials(
+                address=Address(address).to_xdr_sc_address(),
+                nonce=stellar_xdr.Int64(nonce),
+                signature_expiration_ledger=stellar_xdr.Uint32(
+                    signature_expiration_ledger
+                ),
+                # None means "not signed yet" and becomes an SCV_VOID signature
+                signature=signature if signature is not None else scval.to_void(),
+            ),
+        ),
+        root_invocation=make_soroban_invocation(sub_invocations=sub_invocations),
+    )
+
+
+@skip_if_no_protocol_27
+def test_from_authorization_entry():
+    entry = make_authorization_entry(SOROBAN_SOURCE, 123456789, 600000)
+
+    authorization = from_authorization_entry(entry)
+
+    assert authorization == messages.StellarSorobanAuthorizationWithAddress(
+        nonce=123456789,
+        signature_expiration_ledger=600000,
+        address=SOROBAN_SOURCE,
+        invocation=expected_invocation("transfer", 500_111_000),
+    )
+
+
+@skip_if_no_protocol_27
+def test_from_authorization_entry_contract_address():
+    entry = make_authorization_entry(SOROBAN_CONTRACT, 123456789, 700000)
+
+    authorization = from_authorization_entry(entry)
+
+    assert authorization.address == SOROBAN_CONTRACT
+    assert authorization.nonce == 123456789
+    assert authorization.signature_expiration_ledger == 700000
+
+
+@skip_if_no_protocol_27
+def test_from_authorization_entry_sub_invocations():
+    entry = make_authorization_entry(
+        SOROBAN_SOURCE,
+        123456789,
+        600000,
+        sub_invocations=[
+            make_soroban_invocation("child_one", 1),
+            make_soroban_invocation(
+                "child_two", 2, [make_soroban_invocation("grandchild", 3)]
+            ),
+        ],
+    )
+
+    authorization = from_authorization_entry(entry)
+
+    assert authorization.invocation == expected_invocation(
+        "transfer",
+        500_111_000,
+        [
+            expected_invocation("child_one", 1),
+            expected_invocation("child_two", 2, [expected_invocation("grandchild", 3)]),
+        ],
+    )
+
+
+@skip_if_no_protocol_27
+def test_from_authorization_entry_ignores_signature():
+    # The signature is not part of the signed payload, so entries that already
+    # carry one (e.g. collected from other signers) translate the same way.
+    unsigned = make_authorization_entry(SOROBAN_SOURCE, 123456789, 600000)
+    signed = make_authorization_entry(
+        SOROBAN_SOURCE, 123456789, 600000, signature=scval.to_bytes(b"whatever")
+    )
+
+    assert from_authorization_entry(signed) == from_authorization_entry(unsigned)
+
+
+def make_delegates_authorization_entry(
+    address, nonce, signature_expiration_ledger, delegates=()
+):
+    """A CAP-71-01 entry whose account delegates authentication to other addresses."""
+    return stellar_xdr.SorobanAuthorizationEntry(
+        credentials=stellar_xdr.SorobanCredentials(
+            type=stellar_xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS_WITH_DELEGATES,
+            address_with_delegates=stellar_xdr.SorobanAddressCredentialsWithDelegates(
+                address_credentials=stellar_xdr.SorobanAddressCredentials(
+                    address=Address(address).to_xdr_sc_address(),
+                    nonce=stellar_xdr.Int64(nonce),
+                    signature_expiration_ledger=stellar_xdr.Uint32(
+                        signature_expiration_ledger
+                    ),
+                    signature=scval.to_void(),
+                ),
+                delegates=list(delegates),
+            ),
+        ),
+        root_invocation=make_soroban_invocation(),
+    )
+
+
+def make_delegate(address, signature=None, nested_delegates=()):
+    return stellar_xdr.SorobanDelegateSignature(
+        address=Address(address).to_xdr_sc_address(),
+        signature=signature if signature is not None else scval.to_void(),
+        nested_delegates=list(nested_delegates),
+    )
+
+
+@skip_if_no_protocol_27
+def test_from_authorization_entry_with_delegates():
+    # Under CAP-71-01 every delegated signer authenticates the same payload,
+    # bound to the entry's top-level address, so that is what the request
+    # carries.
+    entry = make_delegates_authorization_entry(
+        SOROBAN_CONTRACT,
+        123456789,
+        600000,
+        delegates=[
+            make_delegate(SOROBAN_SOURCE, scval.to_bytes(b"already signed")),
+            make_delegate(
+                SOROBAN_CONTRACT,
+                nested_delegates=[make_delegate(SOROBAN_DELEGATE)],
+            ),
+        ],
+    )
+
+    authorization = from_authorization_entry(entry)
+
+    assert authorization == messages.StellarSorobanAuthorizationWithAddress(
+        nonce=123456789,
+        signature_expiration_ledger=600000,
+        address=SOROBAN_CONTRACT,
+        invocation=expected_invocation("transfer", 500_111_000),
+    )
+
+
+@skip_if_no_protocol_27
+def test_from_authorization_entry_unsupported_credentials():
+    entry = stellar_xdr.SorobanAuthorizationEntry(
+        credentials=stellar_xdr.SorobanCredentials(
+            type=stellar_xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT
+        ),
+        root_invocation=make_soroban_invocation(),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported SorobanCredentials type"):
+        from_authorization_entry(entry)
+
+
+@skip_if_no_protocol_27
+def test_from_authorization_entry_legacy_address_credentials():
+    # The legacy SOROBAN_CREDENTIALS_ADDRESS is deliberately unsupported;
+    # it is due to be deprecated in Protocol 28.
+    entry = stellar_xdr.SorobanAuthorizationEntry(
+        credentials=stellar_xdr.SorobanCredentials(
+            type=stellar_xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS,
+            address=stellar_xdr.SorobanAddressCredentials(
+                address=Address(SOROBAN_SOURCE).to_xdr_sc_address(),
+                nonce=stellar_xdr.Int64(123456789),
+                signature_expiration_ledger=stellar_xdr.Uint32(600000),
+                signature=scval.to_void(),
+            ),
+        ),
+        root_invocation=make_soroban_invocation(),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported SorobanCredentials type"):
+        from_authorization_entry(entry)
+
+
+def make_sac_transfer_tx(auth=()):
+    """A transaction invoking the SAC directly, with optional auth entries."""
+    op = InvokeHostFunction(
+        host_function=stellar_xdr.HostFunction(
+            type=stellar_xdr.HostFunctionType.HOST_FUNCTION_TYPE_INVOKE_CONTRACT,
+            invoke_contract=stellar_xdr.InvokeContractArgs(
+                contract_address=Address(SAC_ADDRESS).to_xdr_sc_address(),
+                function_name=stellar_xdr.SCSymbol(b"transfer"),
+                args=[
+                    scval.to_address(SOROBAN_SOURCE),
+                    scval.to_address(SOROBAN_DESTINATION),
+                    scval.to_int128(500_111_000),
+                ],
+            ),
+        ),
+        auth=list(auth),
+    )
+    return make_default_tx().append_operation(op).build()
+
+
+@skip_if_no_protocol_27
+def test_from_envelope_delegates():
+    # The whole delegate tree reaches the device: it is part of the transaction
+    # the device signs.
+    entry = make_delegates_authorization_entry(
+        SOROBAN_CONTRACT,
+        123456789,
+        600000,
+        delegates=[
+            make_delegate(SOROBAN_SOURCE),
+            make_delegate(
+                SOROBAN_CONTRACT,
+                nested_delegates=[make_delegate(SOROBAN_DELEGATE)],
+            ),
+        ],
+    )
+
+    _, operations, _ = from_envelope(make_sac_transfer_tx(auth=[entry]))
+
+    credentials = operations[0].auth[0].credentials
+    assert (
+        credentials.type
+        == messages.StellarSorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS_WITH_DELEGATES
+    )
+    delegates = credentials.address_with_delegates.delegates
+    assert [d.address for d in delegates] == [SOROBAN_SOURCE, SOROBAN_CONTRACT]
+    assert [d.address for d in delegates[1].nested_delegates] == [SOROBAN_DELEGATE]
+
+
+def test_from_envelope_asset_hints():
+    # the entry authorizes a non-SAC root with a SAC sub-invocation
+    entry = stellar_xdr.SorobanAuthorizationEntry(
+        credentials=stellar_xdr.SorobanCredentials(
+            type=stellar_xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT
+        ),
+        root_invocation=make_soroban_invocation(
+            sub_invocations=[make_soroban_invocation(contract_address=SAC_ADDRESS)]
+        ),
+    )
+    envelope = make_sac_transfer_tx(auth=[entry])
+
+    _, operations, _ = from_envelope(envelope, asset_hints=[SAC_ASSET])
+
+    op = operations[0]
+    assert op.function.invoke_contract.asset_hint == SAC_ASSET_HINT
+    root = op.auth[0].root_invocation
+    assert root.function.contract_fn.asset_hint is None
+    assert root.sub_invocations[0].function.contract_fn.asset_hint == SAC_ASSET_HINT
+
+
+def test_from_envelope_multiple_asset_hints():
+    # hints are matched to invocations by contract address, so their order
+    # does not matter and each lands only on the calls of its own SAC
+    entry = stellar_xdr.SorobanAuthorizationEntry(
+        credentials=stellar_xdr.SorobanCredentials(
+            type=stellar_xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT
+        ),
+        root_invocation=make_soroban_invocation(
+            sub_invocations=[
+                make_soroban_invocation(contract_address=SAC_ADDRESS),
+                make_soroban_invocation(contract_address=NATIVE_SAC_ADDRESS),
+            ]
+        ),
+    )
+    envelope = make_sac_transfer_tx(auth=[entry])
+
+    _, operations, _ = from_envelope(envelope, asset_hints=[Asset.native(), SAC_ASSET])
+
+    root = operations[0].auth[0].root_invocation
+    assert root.function.contract_fn.asset_hint is None
+    subs = root.sub_invocations
+    assert subs[0].function.contract_fn.asset_hint == SAC_ASSET_HINT
+    assert subs[1].function.contract_fn.asset_hint == NATIVE_ASSET_HINT
+
+
+def test_from_envelope_unmatched_asset_hint():
+    envelope = make_sac_transfer_tx()
+
+    # a hint whose SAC is not invoked anywhere is dropped, not sent
+    _, operations, _ = from_envelope(envelope, asset_hints=[UNRELATED_ASSET])
+    assert operations[0].function.invoke_contract.asset_hint is None
+
+    # and no hints means no stamping at all
+    _, operations, _ = from_envelope(envelope)
+    assert operations[0].function.invoke_contract.asset_hint is None
+
+
+@skip_if_no_protocol_27
+def test_from_authorization_entry_asset_hints():
+    entry = make_authorization_entry(
+        SOROBAN_SOURCE,
+        123456789,
+        600000,
+        sub_invocations=[make_soroban_invocation(contract_address=SAC_ADDRESS)],
+    )
+
+    authorization = from_authorization_entry(
+        entry, Network.TESTNET_NETWORK_PASSPHRASE, asset_hints=[SAC_ASSET]
+    )
+
+    assert authorization.invocation.function.contract_fn.asset_hint is None
+    sub = authorization.invocation.sub_invocations[0]
+    assert sub.function.contract_fn.asset_hint == SAC_ASSET_HINT
+
+
+@skip_if_no_protocol_27
+def test_from_authorization_entry_hints_require_network_passphrase():
+    entry = make_authorization_entry(SOROBAN_SOURCE, 123456789, 600000)
+
+    with pytest.raises(ValueError, match="network_passphrase is required"):
+        from_authorization_entry(entry, asset_hints=[SAC_ASSET])
+
+    # an exhausted iterator carries no hints, so no passphrase is needed
+    from_authorization_entry(entry, asset_hints=iter(()))
+
+
+CREATE_WASM_HASH = bytes(range(32))
+CREATE_SALT = bytes(range(32, 64))
+
+
+def make_create_contract_args(preimage=None, executable=None):
+    """CreateContractArgsV2 deploying a Wasm contract on behalf of the source."""
+    if preimage is None:
+        preimage = stellar_xdr.ContractIDPreimage(
+            type=stellar_xdr.ContractIDPreimageType.CONTRACT_ID_PREIMAGE_FROM_ADDRESS,
+            from_address=stellar_xdr.ContractIDPreimageFromAddress(
+                address=Address(SOROBAN_SOURCE).to_xdr_sc_address(),
+                salt=stellar_xdr.Uint256(CREATE_SALT),
+            ),
+        )
+    if executable is None:
+        executable = stellar_xdr.ContractExecutable(
+            type=stellar_xdr.ContractExecutableType.CONTRACT_EXECUTABLE_WASM,
+            wasm_hash=stellar_xdr.Hash(CREATE_WASM_HASH),
+        )
+    return stellar_xdr.CreateContractArgsV2(
+        contract_id_preimage=preimage,
+        executable=executable,
+        constructor_args=[scval.to_address(SOROBAN_DESTINATION), scval.to_uint32(7)],
+    )
+
+
+EXPECTED_CREATE_CONTRACT_ARGS = messages.StellarCreateContractArgsV2(
+    contract_id_preimage=messages.StellarContractIDPreimage(
+        type=messages.StellarContractIDPreimageType.CONTRACT_ID_PREIMAGE_FROM_ADDRESS,
+        from_address=messages.StellarContractIDPreimageFromAddress(
+            address=SOROBAN_SOURCE, salt=CREATE_SALT
+        ),
+    ),
+    executable=messages.StellarContractExecutable(
+        type=messages.StellarContractExecutableType.CONTRACT_EXECUTABLE_WASM,
+        wasm_hash=CREATE_WASM_HASH,
+    ),
+    constructor_args=[
+        messages.StellarSCVal(
+            type=messages.StellarSCValType.SCV_ADDRESS, address=SOROBAN_DESTINATION
+        ),
+        messages.StellarSCVal(type=messages.StellarSCValType.SCV_U32, u32=7),
+    ],
+)
+
+
+def make_create_contract_tx(args, auth=()):
+    """A transaction creating a contract with the given CreateContractArgsV2."""
+    op = InvokeHostFunction(
+        host_function=stellar_xdr.HostFunction(
+            type=stellar_xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2,
+            create_contract_v2=args,
+        ),
+        auth=list(auth),
+    )
+    return make_default_tx().append_operation(op).build()
+
+
+def test_from_envelope_create_contract():
+    args = make_create_contract_args()
+    # the source account authorizes its own deployment
+    entry = stellar_xdr.SorobanAuthorizationEntry(
+        credentials=stellar_xdr.SorobanCredentials(
+            type=stellar_xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT
+        ),
+        root_invocation=stellar_xdr.SorobanAuthorizedInvocation(
+            function=stellar_xdr.SorobanAuthorizedFunction(
+                type=stellar_xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CREATE_CONTRACT_V2_HOST_FN,
+                create_contract_v2_host_fn=args,
+            ),
+            sub_invocations=[],
+        ),
+    )
+
+    _, operations, _ = from_envelope(make_create_contract_tx(args, [entry]))
+
+    op = operations[0]
+    assert op.function == messages.StellarHostFunction(
+        type=messages.StellarHostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2,
+        create_contract_v2=EXPECTED_CREATE_CONTRACT_ARGS,
+    )
+    assert op.auth[0].root_invocation.function == (
+        messages.StellarSorobanAuthorizedFunction(
+            type=messages.StellarSorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CREATE_CONTRACT_V2_HOST_FN,
+            create_contract_v2_host_fn=EXPECTED_CREATE_CONTRACT_ARGS,
+        )
+    )
+
+
+def test_from_envelope_unsupported_contract_creation():
+    # deploying the Stellar Asset Contract of an asset
+    from_asset = stellar_xdr.ContractIDPreimage(
+        type=stellar_xdr.ContractIDPreimageType.CONTRACT_ID_PREIMAGE_FROM_ASSET,
+        from_asset=SAC_ASSET.to_xdr_object(),
+    )
+    with pytest.raises(ValueError, match="Unsupported ContractIDPreimage type"):
+        from_envelope(
+            make_create_contract_tx(make_create_contract_args(preimage=from_asset))
+        )
+
+    stellar_asset = stellar_xdr.ContractExecutable(
+        type=stellar_xdr.ContractExecutableType.CONTRACT_EXECUTABLE_STELLAR_ASSET
+    )
+    with pytest.raises(ValueError, match="Unsupported ContractExecutable type"):
+        from_envelope(
+            make_create_contract_tx(make_create_contract_args(executable=stellar_asset))
+        )
+
+    # the legacy creation without constructor arguments
+    v2_args = make_create_contract_args()
+    legacy = stellar_xdr.CreateContractArgs(
+        v2_args.contract_id_preimage, v2_args.executable
+    )
+    legacy_op = InvokeHostFunction(
+        host_function=stellar_xdr.HostFunction(
+            type=stellar_xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT,
+            create_contract=legacy,
+        ),
+        auth=[],
+    )
+    with pytest.raises(ValueError, match="Unsupported host function type"):
+        from_envelope(make_default_tx().append_operation(legacy_op).build())
+
+    entry = stellar_xdr.SorobanAuthorizationEntry(
+        credentials=stellar_xdr.SorobanCredentials(
+            type=stellar_xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT
+        ),
+        root_invocation=stellar_xdr.SorobanAuthorizedInvocation(
+            function=stellar_xdr.SorobanAuthorizedFunction(
+                type=stellar_xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CREATE_CONTRACT_HOST_FN,
+                create_contract_host_fn=legacy,
+            ),
+            sub_invocations=[],
+        ),
+    )
+    with pytest.raises(ValueError, match="Unsupported SorobanAuthorizedFunction type"):
+        from_envelope(make_sac_transfer_tx(auth=[entry]))

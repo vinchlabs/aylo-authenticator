@@ -1,0 +1,40 @@
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from buffer_types import AnyBytes
+
+    from apps.common.coininfo import CoinInfo
+
+
+def message_digest(coin: CoinInfo, message: AnyBytes) -> bytes:
+    from trezor import utils, wire
+    from trezor.crypto.hashlib import blake256, sha256
+
+    from apps.common.writers import write_compact_size
+
+    if not utils.BITCOIN_ONLY and coin.decred:
+        h = utils.HashWriter(blake256())
+    else:
+        h = utils.HashWriter(sha256())
+    if not coin.signed_message_header:
+        raise wire.DataError("Empty message header not allowed.")
+    write_compact_size(h, len(coin.signed_message_header))
+    h.extend(coin.signed_message_header.encode())
+    write_compact_size(h, len(message))
+    h.extend(message)
+    ret = h.get_digest()
+    if coin.sign_hash_double:
+        ret = sha256(ret).digest()
+    return ret
+
+
+def decode_message(message: AnyBytes) -> str:
+    try:
+        return bytes(message).decode()
+    except UnicodeError:
+        return f"hex({message.hex()})"
+
+
+def is_printable_ascii(bytestring: AnyBytes) -> bool:
+    """Includes space character."""
+    return all(32 <= b <= 126 for b in bytestring)

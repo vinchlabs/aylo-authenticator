@@ -1,0 +1,141 @@
+[package]
+name = "io"
+version = "0.0.0"
+edition = "2024"
+links = "io"
+
+[build-dependencies]
+bindgen.workspace = true
+color-eyre.workspace = true
+xbuild.workspace = true
+
+[dependencies]
+cty.workspace = true
+minicbor = { workspace = true, optional = true }
+
+models.workspace = true
+rtl.workspace = true
+sec.workspace = true
+sys.workspace = true
+
+[features]
+
+# --------------------------------------------------------------------------
+# MCU selection - only enable one of these at a time
+# --------------------------------------------------------------------------
+
+mcu_stm32f427 = ["sec/mcu_stm32f427", "mcu_stm32f4"]
+mcu_stm32f429 = ["sec/mcu_stm32f429", "mcu_stm32f4"]
+mcu_stm32u58 = ["sec/mcu_stm32u58", "mcu_stm32u5"]
+mcu_stm32u5g = ["sec/mcu_stm32u5g", "mcu_stm32u5"]
+mcu_stm32u5a = ["sec/mcu_stm32u5a", "mcu_stm32u5"]
+
+# --------------------------------------------------------------------------
+# Privilege mode
+# --------------------------------------------------------------------------
+
+kernel_mode = ["sec/kernel_mode"]
+secure_mode = ["sec/secure_mode"]
+
+# --------------------------------------------------------------------------
+# Selectable components
+# --------------------------------------------------------------------------
+
+app_loading = ["sys/app_loading", "sec/mldsa44"]
+backlight = []
+ble = ["nrf"]
+button = []
+display = []
+dma2d = []
+emulator = ["sec/emulator"]
+fancy_fatal_error = []
+haptic = ["sys/i2c_bus"]
+hw_jpeg_decoder = []
+ipc = ["sys/ipc"]
+lockable_bootloader = ["sec/lockable_bootloader"]
+nfc = []
+nrf = []
+nrf_auth = ["sec/nrf_auth"]
+pmic = []
+pmic_npm1300 = ["pmic", "sys/i2c_bus"]
+power_manager = []
+power_manager_npm1300 = ["pmic_npm1300"]
+production = ["sec/production"]
+raspi_emulator = []
+rgb_led = []
+sbu = []
+sd_card = []
+smp = ["minicbor", "nrf"]
+suspend = ["sec/suspend"]
+touch = []
+touch_wakeup = []
+usb_iface_debug = ["usb"]
+usb_iface_vcp = ["usb"]
+usb_iface_webauthn = ["usb"]
+usb_iface_wire = ["usb"]
+wireless_stwlc38 = ["sys/i2c_bus"]
+
+# --------------------------------------------------------------------------
+# Driver implementation options
+# --------------------------------------------------------------------------
+
+backlight_tps61043 = []
+backlight_tps61062 = []
+backlight_pin = []
+backlight_pwm = []
+
+touch_none = []
+touch_ft6x36 = ["sys/i2c_bus"]
+touch_ft3168 = ["sys/i2c_bus"]
+touch_stmpe811 = ["sys/i2c_bus"]
+touch_sitronix = ["sys/i2c_bus"]
+
+# touch panels (coordinate correction); selected alongside the driver by the
+# board TOML, mirroring the display driver/panel split below.
+touch_panel_t2t1 = []
+touch_panel_lx154a2422cpt23 = []
+touch_panel_lx250a2410a = []
+
+# Drivers below that always need framebuffer pull it in implicitly,
+# so any project selecting them via the board peripheral chain doesn't have
+# to also advertise `framebuffer` in its project.toml. display_st7789 supports
+# both modes — the model.toml decides.
+# The emulator's unix driver is selected by display/build.rs (not a feature).
+display_none = []
+display_ltdc_dsi = ["framebuffer"]
+display_st7789 = []
+display_vg2864 = ["framebuffer"]
+display_stm32f429i_disc1 = ["framebuffer"]
+
+display_panel_lx250a2401a = []
+display_panel_stm32u5a9j_dk = []
+display_panel_t2t1 = []
+display_panel_lx154a2482 = []
+display_panel_dem240320b1 = []
+display_panel_vg2864 = []
+
+# --------------------------------------------------------------------------
+# Unit test configuration
+# --------------------------------------------------------------------------
+
+test = [
+    "mcu_stm32u5g",
+    "models/model_t3w1",
+    "emulator",
+    "kernel_mode",
+    "secure_mode",
+    "sec/secret",
+    "display_panel_lx250a2401a",
+    "smp",
+]
+
+# --------------------------------------------------------------------------
+# Automatically derived features (do not enable from outside)
+# --------------------------------------------------------------------------
+
+mcu_stm32u5 = ["mcu_stm32"]
+mcu_stm32f4 = ["mcu_stm32"]
+mcu_stm32 = []
+
+framebuffer = []
+usb = []

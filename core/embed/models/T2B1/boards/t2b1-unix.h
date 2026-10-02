@@ -1,0 +1,17 @@
+#ifndef BOARDS_T2B1_UNIX_H
+#define BOARDS_T2B1_UNIX_H
+
+#define WINDOW_WIDTH 193
+#define WINDOW_HEIGHT 339
+#define TOUCH_OFFSET_X 32
+#define TOUCH_OFFSET_Y 84
+
+#define ORIENTATION_NS 1
+
+#define BTN_LEFT_KEY SDLK_LEFT
+#define BTN_RIGHT_KEY SDLK_RIGHT
+
+#define BACKGROUND_FILE "T2B1/background_T2B1.h"
+#define BACKGROUND_NAME background_T2B1_png
+
+#endif  // BOARDS_T2B1_UNIX_H

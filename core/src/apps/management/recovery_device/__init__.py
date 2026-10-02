@@ -1,0 +1,117 @@
+from typing import TYPE_CHECKING
+
+from trezor.enums import RecoveryType
+
+if TYPE_CHECKING:
+    from trezor.messages import RecoveryDevice, Success
+
+# List of RecoveryDevice fields that can be set when doing dry-run recovery.
+# All except `type` are allowed for T1 compatibility, but their values are ignored.
+# If set, `enforce_wordlist` must be True, because we do not support non-enforcing.
+# `backup_method` allows choosing between different ways to input the shares (on Core devices).
+DRY_RUN_ALLOWED_FIELDS = (
+    "type",
+    "word_count",
+    "enforce_wordlist",
+    "input_method",
+    "backup_method",
+)
+
+
+async def recovery_device(msg: RecoveryDevice) -> Success:
+    """
+    Recover BIP39/SLIP39 seed into empty device.
+    Recovery is also possible with replugged Trezor. We call this process Persistence.
+    User starts the process here using the RecoveryDevice msg and then they can unplug
+    the device anytime and continue without a computer.
+    """
+    import storage
+    import storage.device as storage_device
+    import storage.recovery as storage_recovery
+    from trezor import TR, config, wire, workflow
+    from trezor.enums import BackupType
+    from trezor.ui.layouts import confirm_reset_device, prompt_recovery_check
+    from trezor.wire.context import try_get_ctx_ids
+
+    from apps.common import mnemonic
+    from apps.common.request_pin import (
+        error_pin_invalid,
+        request_pin_and_sd_salt,
+        request_pin_confirm,
+    )
+
+    from .homescreen import recovery_homescreen, recovery_process
+
+    recovery_type = msg.type  # local_cache_attribute
+
+    # --------------------------------------------------------
+    # validate
+    if recovery_type is RecoveryType.NormalRecovery:
+        if storage_device.is_initialized():
+            raise wire.UnexpectedMessage("Already initialized")
+    elif recovery_type in (RecoveryType.DryRun, RecoveryType.UnlockRepeatedBackup):
+        from apps.common.seed import raise_if_not_initialized
+
+        raise_if_not_initialized()
+
+        if recovery_type is RecoveryType.DryRun:
+            if storage_device.no_backup():
+                raise wire.ProcessError("Dry-run not available for seedless devices")
+            elif storage_device.needs_backup() or storage_device.unfinished_backup():
+                raise wire.ProcessError("Cannot do dry-run without backed-up seed")
+        elif (
+            recovery_type is RecoveryType.UnlockRepeatedBackup
+            and mnemonic.get_type() == BackupType.Bip39
+        ):
+            raise wire.ProcessError("Repeated Backup not available for BIP39 backups")
+        # check that only allowed fields are set
+        for key, value in msg.__dict__.items():
+            if key not in DRY_RUN_ALLOWED_FIELDS and value is not None:
+                raise wire.ProcessError(f"Forbidden field set in dry-run: {key}")
+    else:
+        raise RuntimeError  # Unknown RecoveryType
+
+    if msg.enforce_wordlist is False:
+        raise wire.ProcessError(
+            "Value enforce_wordlist must be True, Trezor Core enforces words automatically."
+        )
+    # END validate
+    # --------------------------------------------------------
+
+    if storage_recovery.is_in_progress():
+        return await recovery_process(method=msg.backup_method)
+
+    if recovery_type == RecoveryType.NormalRecovery:
+        await confirm_reset_device(recovery=True)
+
+        # wipe storage to make sure the device is in a clear state (except protocol cache)
+        storage.reset(excluded=try_get_ctx_ids())
+
+        # set up pin if requested
+        if msg.pin_protection:
+            newpin = await request_pin_confirm(allow_cancel=False)
+            if not config.change_pin(newpin, None):
+                raise wire.ProcessError("Failed to set PIN")
+
+        storage_device.set_passphrase_enabled(bool(msg.passphrase_protection))
+
+        if msg.u2f_counter is not None:
+            storage_device.set_u2f_counter(msg.u2f_counter)
+
+        if msg.label is not None:
+            storage_device.set_label(msg.label)
+
+    elif recovery_type in (RecoveryType.DryRun, RecoveryType.UnlockRepeatedBackup):
+        await prompt_recovery_check(recovery_type)
+
+        curpin, salt = await request_pin_and_sd_salt(TR.pin__enter)
+        if not config.check_pin(curpin, salt):
+            await error_pin_invalid()
+
+    storage_recovery.set_in_progress(True)
+
+    storage_recovery.set_type(int(recovery_type))
+
+    workflow.set_default(recovery_homescreen)
+
+    return await recovery_process(method=msg.backup_method)

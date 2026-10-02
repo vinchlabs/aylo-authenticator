@@ -1,0 +1,17 @@
+header = "T2T1/boards/trezor_t.h"
+emulator_header = "T2T1/boards/t2t1-unix.h"
+
+[display]
+driver = "io/display_st7789"
+panel = "io/display_panel_t2t1"
+
+[backlight]
+driver = "io/backlight_tps61043"
+
+[touch]
+driver = "io/touch_ft6x36"
+panel = "io/touch_panel_t2t1"
+
+[sd_card]
+
+[sbu]

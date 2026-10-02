@@ -1,0 +1,89 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import pytest
+
+from trezorlib import btc, messages, protocol_v1
+from trezorlib.debuglink import TrezorTestContext as Client
+from trezorlib.mapping import DEFAULT_MAPPING
+from trezorlib.thp import control_byte, thp_io
+from trezorlib.thp.exceptions import ThpErrorCode
+from trezorlib.thp.message import Message
+from trezorlib.tools import parse_path
+from trezorlib.transport import Timeout, Transport
+
+pytestmark = [
+    pytest.mark.protocol("thp"),
+    pytest.mark.setup_client(uninitialized=True),
+]
+
+
+def write_padded(transport: Transport, msg: bytes):
+    assert transport.CHUNK_SIZE is not None
+    padded = msg.ljust(transport.CHUNK_SIZE, b"\x00")
+    transport.write_chunk(padded)
+
+
+def test_v1(client: Client):
+    # There should be a failure response to received init packet (starts with "?##")
+    write_padded(client.transport, b"?## Init packet")
+    res_id, res_data = protocol_v1.read(client.transport)
+    expected = messages.Failure(code=messages.FailureType.InvalidProtocol)
+    res = DEFAULT_MAPPING.decode(res_id, res_data)
+    assert res == expected
+    # make sure the constant "InvalidProtocol" response doesn't have trailing bytes (#6549)
+    assert (res_id, res_data) == DEFAULT_MAPPING.encode(expected)
+
+    # There should be no response for continuation packet (starts with "?" only)
+    write_padded(client.transport, b"? Cont packet")
+    with pytest.raises(Timeout):
+        client.transport.read_chunk(timeout=1)
+
+
+def test_v2_unallocated(client: Client):
+    # A message to unallocated THP channel 0x789a should result in an error
+    message = Message(
+        cid=0x789A,
+        ctrl_byte=control_byte.HANDSHAKE_INIT_REQ,
+        data=bytes.fromhex("0011223344556677"),
+    )
+    write_padded(client.transport, message.to_bytes())
+    response = thp_io.read(client.transport)
+    assert response.cid == 0x789A
+    assert response.ctrl_byte == control_byte.ERROR
+    assert response.data == bytes([ThpErrorCode.UNALLOCATED_CHANNEL])
+
+
+@pytest.mark.setup_client(uninitialized=False)
+def test_message_length(test_ctx: Client):
+    # slightly under _PROTOBUF_BUFFER_SIZE, should pass
+    test_ctx.channel.BUSY_RETRIES = 1
+    session = test_ctx.get_session()
+    btc.sign_message(
+        session,
+        coin_name="Bitcoin",
+        n=parse_path("m/44h/0h/0h/0/0"),
+        message=("u" * 8_600),
+    )
+
+    # slightly over _PROTOBUF_BUFFER_SIZE, should time out
+    with pytest.raises(Timeout):
+        btc.sign_message(
+            session,
+            coin_name="Bitcoin",
+            n=parse_path("m/44h/0h/0h/0/0"),
+            message=("u" * 8_700),
+        )

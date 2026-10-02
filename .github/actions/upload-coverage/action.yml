@@ -1,0 +1,18 @@
+name: 'Upload coverage data'
+description: 'Upload per-test MicroPython coverage data (generated with TREZOR_PROFILING=1)'
+runs:
+  using: "composite"
+  steps:
+    # add per-job suffix so the .coverage files won't be overwritten during merge (by `core_coverage_report`)
+    - run: |
+        for F in core/src/.coverage*
+        do
+          mv -v $F $F.${{ github.job }}${{ strategy.job-index }} || true
+        done
+      shell: sh
+    - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+      with:
+        name: core-coverage-${{ matrix.model }}-${{ github.job }}-${{ strategy.job-index }}
+        path: core/src/.coverage.*
+        retention-days: 7
+        include-hidden-files: true

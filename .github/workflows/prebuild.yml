@@ -1,0 +1,104 @@
+name: "Prebuild checks"
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '13 23 * * *'  # every day @ 23:13
+  push:
+    branches:
+      - 'release/**'
+      - 'secfix/**'
+
+# cancel any previous runs on the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  block-fixup:
+    name: Block fixup
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+      - name: Block Fixup Commit Merge
+        uses: 13rac1/block-fixup-merge-action@bd5504fb9ca0253e109d98eb86b7debc01970cdc  # 13rac1/block-fixup-merge-action@v2.0.0
+
+  # Check the code for style correctness and perform some static code analysis.
+  # Biggest part is the python one - using `ruff`, `flake8`, `pylint` and `pyright`,
+  # also checking Rust files by `rustfmt` and C files by `clang-format`.
+  # Changelogs formats are checked.
+  style_check:
+    name: Style check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+      - name: Initialize and update ts-tvl
+        run: |
+          git submodule update --init --recursive vendor/ts-tvl
+      - name: Initialize and update QR-Code-generator (needed for cargo fmt)
+        run: git submodule update --init --recursive vendor/QR-Code-generator
+      - uses: ./.github/actions/environment
+      - name: "Run style check"
+        run: nix-shell --run "uv run make style_check"
+      - name: "Run .editorconfig check"
+        run: nix-shell --run "uv run make editor_check"
+
+  # Check validity of coin definitions and protobuf files.
+  defs_check:
+    name: Defs check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: "recursive"
+      - uses: ./.github/actions/environment
+      - name: "Run defs check"
+        run: nix-shell --run "uv run make defs_check"
+
+  # Check validity of auto-generated files.
+  gen_check:
+    name: Gen check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: "recursive"
+      - uses: ./.github/actions/environment
+      - name: "Run gen check"
+        run: nix-shell --run "uv run make gen_check"
+
+  # Check uv.lock is up-to-date
+  uvlock_check:
+    name: uv.lock check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: "recursive"
+      - uses: ./.github/actions/environment
+        with:
+          pre-download: false
+      - name: "Run uv.lock check"
+        run: nix-shell --run "make uvlock_check"
+
+  # Verifying that all commits changing some functionality have a changelog entry
+  # or contain `[no changelog]` in the commit message.
+  changelog_check:
+    name: Changelog check
+    if: ${{ github.ref != 'main' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: "Run changelog check"
+        run: ./ci/check_changelog.sh

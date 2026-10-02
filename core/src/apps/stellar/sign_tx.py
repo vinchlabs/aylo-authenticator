@@ -1,0 +1,235 @@
+from typing import TYPE_CHECKING
+
+from apps.common.keychain import with_slip44_keychain
+
+from . import CURVE, PATTERN, SLIP44_ID
+
+if TYPE_CHECKING:
+    from trezor.messages import StellarSignedTx, StellarSignTx
+
+    from apps.common.keychain import Keychain as Slip21Keychain
+
+
+@with_slip44_keychain(
+    *[PATTERN], slip44_id=SLIP44_ID, curve=CURVE, slip21_namespaces=[[b"SLIP-0024"]]
+)
+async def sign_tx(msg: StellarSignTx, keychain: Slip21Keychain) -> StellarSignedTx:
+    from trezor import TR
+    from trezor.crypto.curve import ed25519
+    from trezor.crypto.hashlib import sha256
+    from trezor.enums import StellarMemoType
+    from trezor.messages import (
+        StellarAccountMergeOp,
+        StellarCreateAccountOp,
+        StellarInvokeHostFunctionOp,
+        StellarPathPaymentStrictReceiveOp,
+        StellarPathPaymentStrictSendOp,
+        StellarPaymentOp,
+        StellarSignedTx,
+        StellarTxExt,
+        StellarTxExtRequest,
+        StellarTxOpRequest,
+    )
+    from trezor.ui.layouts import show_continue_in_app
+    from trezor.ui.layouts.progress import progress
+    from trezor.wire import DataError, ProcessError
+    from trezor.wire.context import call_any
+
+    from apps.common import paths, seed
+
+    from . import consts, helpers, layout, writers
+    from .operations import process_operation
+
+    await paths.validate_path(keychain, msg.address_n)
+
+    node = keychain.derive(msg.address_n)
+    pubkey = seed.remove_ed25519_prefix(node.public_key())
+    num_operations = msg.num_operations  # local_cache_attribute
+
+    if num_operations == 0:
+        raise ProcessError("Stellar: At least one operation is required")
+
+    w = bytearray()
+
+    # ---------------------------------
+    # INIT
+    # ---------------------------------
+    is_sending_from_trezor_account = True
+    current_output_index = 0
+
+    network_passphrase_hash = sha256(msg.network_passphrase.encode()).digest()
+    writers.write_bytes_fixed(w, network_passphrase_hash, 32)
+    writers.write_bytes_fixed(w, consts.TX_TYPE, 4)
+
+    address = helpers.address_from_public_key(pubkey)
+    accounts_match = msg.source_account == address
+
+    writers.write_pubkey(w, msg.source_account)
+    writers.write_uint32(w, msg.fee)
+    writers.write_uint64(w, msg.sequence_number)
+
+    if not accounts_match:
+        is_sending_from_trezor_account = False
+        # If the tx source account does not match the Trezor account, we need to confirm it.
+        await layout.require_confirm_tx_source(msg.source_account)
+
+    # timebounds are sent as uint32s since that's all we can display, but they must be hashed as 64bit
+    writers.write_bool(w, True)
+    writers.write_uint64(w, msg.timebounds_start)
+    writers.write_uint64(w, msg.timebounds_end)
+    memo_type = msg.memo_type  # local_cache_attribute
+    memo_text = msg.memo_text  # local_cache_attribute
+
+    writers.write_uint32(w, memo_type)
+    if memo_type == StellarMemoType.NONE:
+        # nothing is serialized
+        memo_confirm_text = ""
+    elif memo_type == StellarMemoType.TEXT:
+        # Text: 4 bytes (size) + up to 28 bytes
+        if memo_text is None:
+            raise DataError("Stellar: Missing memo text")
+        written = writers.write_string(w, memo_text)
+        if written > 28:
+            raise ProcessError("Stellar: max length of a memo text is 28 bytes")
+        memo_confirm_text = memo_text
+    elif memo_type == StellarMemoType.ID:
+        # ID: 64 bit unsigned integer
+        if msg.memo_id is None:
+            raise DataError("Stellar: Missing memo id")
+        writers.write_uint64(w, msg.memo_id)
+        memo_confirm_text = str(msg.memo_id)
+    elif memo_type in (StellarMemoType.HASH, StellarMemoType.RETURN):
+        # Hash/Return: 32 byte hash
+        if msg.memo_hash is None:
+            raise DataError("Stellar: Missing memo hash")
+        writers.write_bytes_fixed(w, bytearray(msg.memo_hash), 32)
+        memo_confirm_text = msg.memo_hash.hex()
+    else:
+        raise ProcessError("Stellar invalid memo type")
+
+    if msg.payment_req:
+        from apps.common.payment_request import PaymentRequestVerifier
+
+        verifier = PaymentRequestVerifier(msg.payment_req, SLIP44_ID, keychain)
+    else:
+        verifier = None
+
+    # ---------------------------------
+    # OPERATION
+    # ---------------------------------
+
+    # these two are used in case of payment requests, where we allow only one output, hence we have a single output address and asset
+    output_address = None
+    output_asset = None
+    has_soroban_op = False
+
+    progress_obj = progress(indeterminate=True)
+    writers.write_uint32(w, num_operations)
+    for i in range(num_operations):
+        progress_obj.report(int(i / num_operations * 900))
+        op = await call_any(StellarTxOpRequest(), *consts.op_codes.keys())
+
+        if StellarInvokeHostFunctionOp.is_type_of(op):
+            # A Soroban operation must be the only operation in the transaction.
+            if num_operations != 1:
+                raise ProcessError(
+                    "Stellar: a Soroban operation must be the only operation"
+                )
+            if memo_type != StellarMemoType.NONE:
+                raise ProcessError(
+                    "Stellar: a Soroban operation cannot be used with a memo"
+                )
+            has_soroban_op = True
+        elif i == 0:
+            # Soroban transactions do not support memos
+            await layout.require_confirm_memo(memo_type, memo_confirm_text)
+
+        await process_operation(
+            w,
+            op,  # type: ignore [Argument of type "StellarInvokeHostFunctionOp | MessageType" cannot be assigned to parameter "op" of type "StellarMessageType" in function "process_operation"]
+            current_output_index,
+            verifier,
+            msg.source_account,
+            network_passphrase_hash,
+        )
+
+        if msg.payment_req:
+            assert verifier is not None
+            if current_output_index != 0:
+                raise ProcessError(
+                    "Multiple operations not supported for payment requests"
+                )
+            assert output_address is None and output_asset is None
+
+        if op.source_account is not None and op.source_account != address:  # type: ignore [Cannot access attribute "source_account" for class "MessageType"]
+            # if the operation source account does not match the Trezor account
+            is_sending_from_trezor_account = False
+
+        if any(
+            op_type.is_type_of(op)
+            for op_type in [
+                StellarAccountMergeOp,
+                StellarCreateAccountOp,
+                StellarPaymentOp,
+                StellarPathPaymentStrictSendOp,
+                StellarPathPaymentStrictReceiveOp,
+            ]
+        ):
+            current_output_index += 1
+            if StellarPaymentOp.is_type_of(op):
+                output_address, output_asset = op.destination_account, op.asset
+    progress_obj.stop()
+
+    # ---------------------------------
+    # FINAL
+    # ---------------------------------
+    # Transaction extension (ext union)
+    if has_soroban_op:
+        # For Soroban transactions, request StellarTxExt with soroban_data
+        from trezor.wire.context import call
+
+        tx_ext = await call(StellarTxExtRequest(), StellarTxExt)
+        if tx_ext.v != 1:
+            raise DataError("Stellar: Soroban transaction requires ext.v = 1")
+        if tx_ext.soroban_data is None:
+            raise DataError("Stellar: missing soroban_data")
+        writers.write_uint32(w, 1)  # ext.v = 1
+        # Write soroban_data as raw XDR bytes (SorobanTransactionData struct)
+        writers.write_bytes_unchecked(w, tx_ext.soroban_data)
+    else:
+        # For non-Soroban transactions, ext.v = 0 (empty union).
+        # We intentionally do NOT request StellarTxExtRequest here to maintain
+        # backward compatibility with existing SDK implementations.
+        writers.write_uint32(w, 0)
+
+    if msg.payment_req:
+        assert verifier is not None
+
+        verifier.verify()
+
+        assert output_address
+        assert output_asset
+
+        await layout.require_confirm_payment_request(
+            output_address,
+            msg.payment_req,
+            msg.address_n,
+            output_asset,
+        )
+
+    # final confirm
+    await layout.confirm_tx_final(
+        msg.address_n,
+        msg.fee,
+        (msg.timebounds_start, msg.timebounds_end),
+        is_sending_from_trezor_account,
+        msg.network_passphrase,
+    )
+
+    # sign
+    digest = sha256(w).digest()
+    signature = ed25519.sign(node.private_key(), digest)
+    show_continue_in_app(TR.send__transaction_signed)
+
+    # Add the public key for verification that the right account was used for signing
+    return StellarSignedTx(public_key=pubkey, signature=signature)

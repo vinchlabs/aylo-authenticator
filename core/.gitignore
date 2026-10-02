@@ -1,0 +1,10 @@
+build/
+build-docker/
+build-xtask/
+emu.config
+tests/trezor_monero_tests*
+.coverage
+.coverage.*
+htmlcov/
+mypy_report
+tools/gdb_scripts/*.log

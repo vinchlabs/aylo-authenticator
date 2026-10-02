@@ -1,0 +1,315 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <trezor_bsp.h>
+#include <trezor_rtl.h>
+
+#include <io/touch.h>
+#include <io/unix/sdl_display.h>
+#include <sys/systick.h>
+#include <sys/unix/sdl_event.h>
+
+#include "../touch_poll.h"
+
+extern int sdl_display_res_x, sdl_display_res_y;
+extern int sdl_touch_offset_x, sdl_touch_offset_y;
+
+// distance from the edge where arrow button swipe starts [px]
+static const int _btn_swipe_begin = 120;
+// length of the arrow button swipe [px]
+static const int _btn_swipe_length = 60;
+
+// A state machine to handle both mouse inputs (simulating touch) and arrow
+// buttons (to simulate scroll movements). The variable `input_state` is used to
+// ensure that arrow keys are not processed when mouse input is in progress and
+// that mouse actions are not processed while arrow button swipe is not
+// finished.
+typedef enum {
+  IDLE,
+  MOUSE_DOWN_INSIDE,
+  MOUSE_DOWN_OUTSIDE,
+  BUTTON_SWIPE_INITIATED,
+} touch_state_t;
+
+typedef struct {
+  // Set if driver is initialized
+  secbool initialized;
+  // Current state of the touch driver
+  touch_state_t state;
+
+  uint32_t swipe_time;
+  int swipe_start_x;
+  int swipe_start_y;
+  int swipe_end_x;
+  int swipe_end_y;
+  SDL_Keycode swipe_key;
+
+  // Last event not yet read
+  uint32_t last_event;
+
+} touch_driver_t;
+
+// Touch driver instance
+static touch_driver_t g_touch_driver = {
+    .initialized = secfalse,
+};
+
+#if defined(USE_SUSPEND) && defined(USE_TOUCH_WAKEUP)
+// Whether touch wakeup during suspend is enabled.
+// Kept outside the driver struct so it survives touch_deinit() memset.
+static secbool g_touch_wakeup_enabled = sectrue;
+#endif  // USE_SUSPEND && USE_TOUCH_WAKEUP
+
+static bool is_inside_display(int x, int y) {
+  return x >= sdl_touch_offset_x && y >= sdl_touch_offset_y &&
+         x - sdl_touch_offset_x < sdl_display_res_x &&
+         y - sdl_touch_offset_y < sdl_display_res_y;
+}
+
+static void handle_mouse_events(touch_driver_t* drv, SDL_Event* event) {
+  int event_x;
+  int event_y;
+  if (event->type == SDL_EVENT_MOUSE_MOTION) {
+    sdl_display_window_to_display(event->motion.x, event->motion.y, &event_x,
+                                  &event_y);
+  } else {
+    sdl_display_window_to_display(event->button.x, event->button.y, &event_x,
+                                  &event_y);
+  }
+  bool inside_display = is_inside_display(event_x, event_y);
+
+  switch (event->type) {
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+      if (inside_display) {
+        int x = event_x - sdl_touch_offset_x;
+        int y = event_y - sdl_touch_offset_y;
+        drv->last_event = TOUCH_START | touch_pack_xy(x, y);
+        drv->state = MOUSE_DOWN_INSIDE;
+      }
+      break;
+
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+      if (drv->state != IDLE) {
+        int x = inside_display ? event_x - sdl_touch_offset_x
+                               : touch_unpack_x(drv->last_event);
+        int y = inside_display ? event_y - sdl_touch_offset_y
+                               : touch_unpack_y(drv->last_event);
+        drv->last_event = TOUCH_END | touch_pack_xy(x, y);
+        drv->state = IDLE;
+      }
+      break;
+
+    case SDL_EVENT_MOUSE_MOTION:
+      if (drv->state != IDLE) {
+        if (inside_display) {
+          int x = event_x - sdl_touch_offset_x;
+          int y = event_y - sdl_touch_offset_y;
+          // simulate TOUCH_START if pressed in mouse returned on visible area
+          if (drv->state == MOUSE_DOWN_OUTSIDE) {
+            drv->last_event = TOUCH_START | touch_pack_xy(x, y);
+          } else {
+            drv->last_event = TOUCH_MOVE | touch_pack_xy(x, y);
+          }
+          drv->state = MOUSE_DOWN_INSIDE;
+        } else {
+          if (drv->state == MOUSE_DOWN_INSIDE) {
+            // use last valid coordinates and simulate TOUCH_END
+            int x = touch_unpack_x(drv->last_event);
+            int y = touch_unpack_y(drv->last_event);
+            drv->last_event = TOUCH_END | touch_pack_xy(x, y);
+          }
+          drv->state = MOUSE_DOWN_OUTSIDE;
+        }
+      }
+      break;
+  }
+}
+
+static void handle_button_events(touch_driver_t* drv, SDL_Event* event) {
+  // Handle arrow buttons to trigger a scroll movement by set length in the
+  // direction of the button
+  if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat) {
+    if (drv->state != BUTTON_SWIPE_INITIATED) {
+      switch (event->key.key) {
+        case SDLK_LEFT:
+          drv->swipe_start_x = _btn_swipe_begin;
+          drv->swipe_start_y = sdl_display_res_y / 2;
+          drv->swipe_end_x = drv->swipe_start_x + _btn_swipe_length;
+          drv->swipe_end_y = drv->swipe_start_y;
+          drv->state = BUTTON_SWIPE_INITIATED;
+          break;
+        case SDLK_RIGHT:
+          drv->swipe_start_x = sdl_display_res_x - _btn_swipe_begin;
+          drv->swipe_start_y = sdl_display_res_y / 2;
+          drv->swipe_end_x = drv->swipe_start_x - _btn_swipe_length;
+          drv->swipe_end_y = drv->swipe_start_y;
+          drv->state = BUTTON_SWIPE_INITIATED;
+          break;
+        case SDLK_UP:
+          drv->swipe_start_x = sdl_display_res_x / 2;
+          drv->swipe_start_y = _btn_swipe_begin;
+          drv->swipe_end_x = drv->swipe_start_x;
+          drv->swipe_end_y = drv->swipe_start_y + _btn_swipe_length;
+          drv->state = BUTTON_SWIPE_INITIATED;
+          break;
+        case SDLK_DOWN:
+          drv->swipe_start_x = sdl_display_res_x / 2;
+          drv->swipe_start_y = sdl_display_res_y - _btn_swipe_begin;
+          drv->swipe_end_x = drv->swipe_start_x;
+          drv->swipe_end_y = drv->swipe_start_y - _btn_swipe_length;
+          drv->state = BUTTON_SWIPE_INITIATED;
+          break;
+      }
+
+      if (drv->state == BUTTON_SWIPE_INITIATED) {
+        drv->swipe_key = event->key.key;
+        drv->swipe_time = systick_ms();
+        drv->last_event =
+            TOUCH_START | touch_pack_xy(drv->swipe_start_x, drv->swipe_start_y);
+      }
+    }
+  } else if (event->type == SDL_EVENT_KEY_UP &&
+             event->key.key == drv->swipe_key) {
+    if (drv->state == BUTTON_SWIPE_INITIATED) {
+      drv->last_event =
+          TOUCH_END | touch_pack_xy(drv->swipe_end_x, drv->swipe_end_y);
+      drv->state = IDLE;
+    }
+  }
+}
+
+// Called from global event loop to filter and process SDL events
+static void touch_sdl_event_filter(void* context, SDL_Event* sdl_event) {
+  touch_driver_t* drv = (touch_driver_t*)context;
+
+  if (drv->state == IDLE || drv->state == MOUSE_DOWN_INSIDE ||
+      drv->state == MOUSE_DOWN_OUTSIDE) {
+    handle_mouse_events(drv, sdl_event);
+  }
+
+  if (drv->state == IDLE || drv->state == BUTTON_SWIPE_INITIATED) {
+    handle_button_events(drv, sdl_event);
+  }
+}
+
+secbool touch_init(void) {
+  touch_driver_t* drv = &g_touch_driver;
+
+  if (drv->initialized) {
+    return sectrue;
+  }
+
+  memset(drv, 0, sizeof(touch_driver_t));
+  drv->state = IDLE;
+
+  if (!touch_poll_init()) {
+    goto cleanup;
+  }
+
+  if (!sdl_events_register(touch_sdl_event_filter, drv)) {
+    goto cleanup;
+  }
+
+  drv->initialized = sectrue;
+  return drv->initialized;
+
+cleanup:
+  return secfalse;
+}
+
+void touch_deinit(void) {
+  touch_driver_t* drv = &g_touch_driver;
+
+  if (drv->initialized == sectrue) {
+    touch_poll_deinit();
+    memset(drv, 0, sizeof(touch_driver_t));
+  }
+}
+
+void touch_power_set(bool on) {
+  // Not implemented on the emulator
+}
+
+#ifdef USE_SUSPEND
+void touch_suspend(void) {
+  // Not implemented on the emulator
+}
+
+void touch_resume(void) {
+  // Not implemented on the emulator
+}
+
+#ifdef USE_TOUCH_WAKEUP
+void touch_wakeup_set_enabled(bool enabled) {
+  g_touch_wakeup_enabled = (enabled ? sectrue : secfalse);
+}
+
+bool touch_wakeup_get_enabled(void) {
+  return (sectrue == g_touch_wakeup_enabled);
+}
+#endif  // USE_TOUCH_WAKEUP
+
+#endif  // USE_SUSPEND
+
+secbool touch_ready(void) {
+  touch_driver_t* drv = &g_touch_driver;
+  return drv->initialized;
+}
+
+secbool touch_set_sensitivity(uint8_t value) {
+  // Not implemented on the emulator
+  return sectrue;
+}
+
+uint8_t touch_get_version(void) {
+  // Not implemented on the emulator
+  return 0;
+}
+
+secbool touch_activity(void) {
+  if (touch_get_event() != 0) {
+    return sectrue;
+  } else {
+    return secfalse;
+  }
+}
+
+uint32_t touch_get_state(void) {
+  touch_driver_t* drv = &g_touch_driver;
+
+  if (sectrue != drv->initialized) {
+    return 0;
+  }
+
+  sdl_events_poll();
+
+  if (drv->state == BUTTON_SWIPE_INITIATED) {
+    if (drv->last_event & TOUCH_START) {
+      // Emulate swipe by sending MOVE event after 100ms
+      uint32_t time_delta = systick_ms() - drv->swipe_time;
+      if (time_delta > 100) {
+        int x = (drv->swipe_start_x + drv->swipe_end_x) / 2;
+        int y = (drv->swipe_start_y + drv->swipe_end_y) / 2;
+        drv->last_event = TOUCH_MOVE | touch_pack_xy(x, y);
+      }
+    }
+  }
+
+  return drv->last_event;
+}

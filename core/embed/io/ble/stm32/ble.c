@@ -1,0 +1,1509 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifdef KERNEL_MODE
+#include <stdint.h>
+#include <string.h>
+
+#include <trezor_bsp.h>
+#include <trezor_model.h>
+#include <trezor_rtl.h>
+
+#include <io/ble.h>
+#include <io/nrf.h>
+#include <io/tsqueue.h>
+#include <sec/unit_properties.h>
+#include <sys/irq.h>
+#include <sys/sysevent_source.h>
+#include <sys/systick.h>
+#include <sys/systimer.h>
+
+#ifdef USE_BACKUP_RAM
+#include <sec/backup_ram.h>
+#endif
+
+#ifdef USE_POWER_MANAGER
+#include <io/power_manager.h>
+#endif
+
+#include "ble_comm_defs.h"
+
+// changing value of TX_QUEUE_LEN is not allowed
+// as it might result in order of messages being changed
+#define TX_QUEUE_LEN 1
+#define EVENT_QUEUE_LEN 4
+#define RX_QUEUE_LEN 16
+#define LOOP_PERIOD_MS 20
+#define PING_PERIOD 100
+
+#define BLE_DATA_HEADER_SIZE 7
+#define BLE_DATA_SIZE (BLE_RX_PACKET_SIZE + BLE_DATA_HEADER_SIZE)
+
+_Static_assert(BLE_TX_PACKET_SIZE + BLE_DATA_HEADER_SIZE <= BLE_DATA_SIZE,
+               "BLE_DATA_SIZE must fit a TX packet, not just an RX packet");
+
+typedef struct {
+  uint8_t version;
+  bool enabled;
+} ble_recovery_data_t;
+
+typedef struct {
+  ble_mode_t mode_requested;
+  ble_mode_t mode_current;
+  bool connected;
+  bt_le_addr_t connected_addr;
+  uint8_t peer_count;
+  bool initialized;
+  bool enabled;
+  bool status_valid;
+  bool accept_msgs;
+  bool reboot_on_resume;
+  bool restart_adv_on_disconnect;
+  bool next_adv_with_disconnect;  // next advertising will be started with
+                                  // forced disconnect flag
+  uint8_t busy_flag;
+  bool pairing_allowed;
+  bool pairing_requested;
+  ble_event_t event_queue_buffers[EVENT_QUEUE_LEN];
+  tsqueue_entry_t event_queue_entries[EVENT_QUEUE_LEN];
+  tsqueue_t event_queue;
+
+  uint8_t rx_queue_buffers[RX_QUEUE_LEN][BLE_DATA_SIZE];
+  tsqueue_entry_t rx_queue_entries[RX_QUEUE_LEN];
+  tsqueue_t rx_queue;
+
+  uint8_t tx_queue_buffers[TX_QUEUE_LEN][BLE_DATA_SIZE];
+  tsqueue_entry_t ts_queue_entries[TX_QUEUE_LEN];
+  tsqueue_t tx_queue;
+
+  uint8_t adv_name[BLE_ADV_NAME_LEN];
+  bool static_mac;
+  bt_le_addr_t mac;
+  bool mac_ready;
+  bool high_speed;
+  ble_tx_power_level_t power_level;
+
+  uint8_t bond_count;
+  bt_le_addr_t bonds[BLE_MAX_BONDS];
+  bool bonds_ready;
+
+  bool result;
+  bool result_ready;
+
+  systimer_t *timer;
+  uint16_t ping_cntr;
+
+#ifdef USE_POWER_MANAGER
+  uint8_t soc;
+  bool soc_send;
+#endif
+
+} ble_driver_t;
+
+static ble_driver_t g_ble_driver = {0};
+
+static const syshandle_vmt_t ble_handle_vmt;
+static const syshandle_vmt_t ble_iface_handle_vmt;
+
+static void ble_pairing_end(ble_driver_t *drv) {
+  drv->pairing_allowed = false;
+  drv->pairing_requested = false;
+  drv->mode_requested = BLE_MODE_KEEP_CONNECTION;
+}
+
+static bool ble_send_state_request(ble_driver_t *drv) {
+  (void)drv;
+  uint8_t cmd = INTERNAL_CMD_SEND_STATE;
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, &cmd, sizeof(cmd), NULL, NULL);
+}
+
+static bool ble_send_advertising_on(ble_driver_t *drv, bool whitelist) {
+  (void)drv;
+
+  unit_properties_t props;
+  unit_properties_get(&props);
+
+  cmd_advertising_on_t data = {
+      .cmd_id = INTERNAL_CMD_ADVERTISING_ON,
+      .flags.whitelist = whitelist ? 1 : 0,
+      .flags.user_disconnect = drv->next_adv_with_disconnect ? 1 : 0,
+      .flags.reserved = 0,
+      .color = props.color,
+      .static_addr = drv->static_mac,
+      .device_code = MODEL_BLE_CODE,
+  };
+
+  drv->next_adv_with_disconnect = false;
+
+  memcpy(data.name, drv->adv_name, BLE_ADV_NAME_LEN);
+
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, (uint8_t *)&data, sizeof(data),
+                      NULL, NULL);
+}
+
+static bool ble_send_speed_request(ble_driver_t *drv, bool high_speed) {
+  (void)drv;
+  uint8_t cmd =
+      high_speed ? INTERNAL_CMD_SET_SPEED_HIGH : INTERNAL_CMD_SET_SPEED_LOW;
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, &cmd, sizeof(cmd), NULL, NULL);
+}
+
+static bool ble_send_power_level_request(ble_driver_t *drv,
+                                         ble_tx_power_level_t power_level) {
+  (void)drv;
+  uint8_t cmd[2] = {INTERNAL_CMD_SET_TX_POWER, (uint8_t)power_level};
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, cmd, sizeof(cmd), NULL, NULL);
+}
+
+static bool ble_send_advertising_off(ble_driver_t *drv) {
+  (void)drv;
+  uint8_t cmd = INTERNAL_CMD_ADVERTISING_OFF;
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, &cmd, sizeof(cmd), NULL, NULL);
+}
+
+static bool ble_send_erase_bonds(ble_driver_t *drv) {
+  (void)drv;
+  uint8_t cmd = INTERNAL_CMD_ERASE_BONDS;
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, &cmd, sizeof(cmd), NULL, NULL);
+}
+
+static bool ble_send_disconnect(ble_driver_t *drv) {
+  (void)drv;
+  uint8_t cmd = INTERNAL_CMD_DISCONNECT;
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, &cmd, sizeof(cmd), NULL, NULL);
+}
+
+static bool ble_send_pairing_reject(ble_driver_t *drv) {
+  uint8_t cmd = INTERNAL_CMD_REJECT_PAIRING;
+  bool result =
+      nrf_send_msg(NRF_SERVICE_BLE_MANAGER, &cmd, sizeof(cmd), NULL, NULL);
+
+  if (result) {
+    ble_pairing_end(drv);
+  }
+
+  return result;
+}
+
+static bool ble_send_pairing_accept(ble_driver_t *drv, uint8_t *code) {
+  cmd_allow_pairing_t data = {
+      .cmd_id = INTERNAL_CMD_ALLOW_PAIRING,
+  };
+
+  memcpy(data.code, code, sizeof(data.code));
+
+  bool result = nrf_send_msg(NRF_SERVICE_BLE_MANAGER, (uint8_t *)&data,
+                             sizeof(data), NULL, NULL);
+
+  if (result) {
+    ble_pairing_end(drv);
+  }
+
+  return result;
+}
+
+static bool ble_send_mac_request(ble_driver_t *drv) {
+  UNUSED(drv);
+  uint8_t cmd = INTERNAL_CMD_GET_MAC;
+
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, &cmd, sizeof(cmd), NULL, NULL);
+}
+
+static bool ble_send_bond_list_request(ble_driver_t *drv) {
+  UNUSED(drv);
+  uint8_t cmd = INTERNAL_CMD_GET_BOND_LIST;
+
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, &cmd, sizeof(cmd), NULL, NULL);
+}
+#ifdef USE_POWER_MANAGER
+static bool ble_send_battery_update(uint8_t level) {
+  uint8_t cmd[2] = {INTERNAL_CMD_BATTERY_UPDATE, level};
+
+  return nrf_send_msg(NRF_SERVICE_BLE_MANAGER, cmd, sizeof(cmd), NULL, NULL);
+}
+#endif
+
+static void ble_process_rx_msg_status(const uint8_t *data, uint32_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return;
+  }
+
+  event_status_msg_t msg = {0};
+  memcpy(&msg, data, MIN(sizeof(event_status_msg_t), len));
+
+  if (!drv->status_valid && msg.connected &&
+      drv->mode_requested == BLE_MODE_OFF) {
+    drv->mode_requested = BLE_MODE_KEEP_CONNECTION;
+  }
+
+  if (drv->connected != msg.connected) {
+    if (msg.connected) {
+      // new connection
+
+      ble_event_t event = {.type = BLE_CONNECTED};
+      tsqueue_enqueue(&drv->event_queue, (uint8_t *)&event, sizeof(event),
+                      NULL);
+
+      drv->pairing_requested = false;
+      if (drv->mode_current == BLE_MODE_PAIRING) {
+        drv->pairing_allowed = true;
+      } else {
+        drv->pairing_allowed = false;
+      }
+
+      if (drv->mode_current != BLE_MODE_PAIRING) {
+#ifdef BLE_MULTIPOINT
+        if (msg.peer_count > 1) {
+          drv->mode_requested = BLE_MODE_CONNECTABLE;
+        } else {
+          drv->mode_requested = BLE_MODE_KEEP_CONNECTION;
+        }
+#else
+        drv->mode_requested = BLE_MODE_KEEP_CONNECTION;
+#endif
+      }
+    } else {
+      // connection lost
+      ble_event_t event = {.type = BLE_DISCONNECTED};
+      tsqueue_enqueue(&drv->event_queue, (uint8_t *)&event, sizeof(event),
+                      NULL);
+
+      if (drv->mode_requested == BLE_MODE_PAIRING) {
+        ble_pairing_end(drv);
+      }
+
+      drv->pairing_allowed = false;
+      drv->pairing_requested = false;
+      if (msg.peer_count > 0) {
+        drv->mode_requested = BLE_MODE_CONNECTABLE;
+      } else {
+        drv->mode_requested = BLE_MODE_OFF;
+      }
+    }
+
+    memcpy(drv->connected_addr.addr, msg.connected_addr,
+           sizeof(drv->connected_addr.addr));
+    drv->connected_addr.type = msg.connected_addr_type;
+    drv->connected = msg.connected;
+  } else {
+    if (memcmp(drv->connected_addr.addr, msg.connected_addr,
+               sizeof(drv->connected_addr.addr)) != 0 ||
+        drv->connected_addr.type != msg.connected_addr_type) {
+      // address changed
+      memcpy(drv->connected_addr.addr, msg.connected_addr,
+             sizeof(drv->connected_addr.addr));
+      drv->connected_addr.type = msg.connected_addr_type;
+
+      ble_event_t event = {.type = BLE_CONNECTION_CHANGED};
+      memcpy(event.data, drv->connected_addr.addr,
+             sizeof(drv->connected_addr.addr));
+      tsqueue_enqueue(&drv->event_queue, (uint8_t *)&event, sizeof(event),
+                      NULL);
+    }
+  }
+
+  ble_mode_t prev_mode = drv->mode_current;
+  if ((msg.advertising && !msg.advertising_whitelist) ||
+      (msg.connected && drv->pairing_allowed && !msg.flags.bonded_connection)) {
+    drv->mode_current = BLE_MODE_PAIRING;
+  } else if (msg.advertising) {
+    drv->mode_current = BLE_MODE_CONNECTABLE;
+  } else if (msg.connected) {
+    drv->mode_current = BLE_MODE_KEEP_CONNECTION;
+  } else {
+    drv->mode_current = BLE_MODE_OFF;
+  }
+
+#ifdef BLE_MULTIPOINT
+  if (drv->mode_current == BLE_MODE_KEEP_CONNECTION && drv->peer_count > 1) {
+    drv->mode_requested = BLE_MODE_CONNECTABLE;
+  }
+#endif
+
+  drv->busy_flag = msg.busy_flag;
+  drv->peer_count = msg.peer_count;
+
+  if (msg.connected && msg.flags.bonded_connection &&
+      drv->mode_requested == BLE_MODE_PAIRING) {
+    // bonded device connected in pairing mode - end pairing
+
+    ble_event_t event = {.type = BLE_PAIRING_NOT_NEEDED};
+    tsqueue_enqueue(&drv->event_queue, (uint8_t *)&event, sizeof(event), NULL);
+
+    ble_pairing_end(drv);
+  }
+
+  if (prev_mode == BLE_MODE_PAIRING && drv->mode_current != BLE_MODE_PAIRING) {
+    if (drv->mode_requested == BLE_MODE_PAIRING) {
+      // unexpected pairing end - restart pairing
+      ble_send_advertising_on(drv, false);
+    } else {
+      ble_pairing_end(drv);
+    }
+  }
+
+  if (drv->mode_requested == BLE_MODE_KEEP_CONNECTION && !drv->connected) {
+    if (drv->peer_count > 0 && drv->restart_adv_on_disconnect) {
+      drv->mode_requested = BLE_MODE_CONNECTABLE;
+    } else {
+      drv->mode_requested = BLE_MODE_OFF;
+    }
+  }
+
+  if (drv->mode_requested == BLE_MODE_CONNECTABLE &&
+      !drv->restart_adv_on_disconnect) {
+    if (drv->connected) {
+      drv->mode_requested = BLE_MODE_KEEP_CONNECTION;
+    } else {
+      drv->mode_requested = BLE_MODE_OFF;
+    }
+  }
+
+  // if there are no peers (i.e. after wiping the bonds), it makes no sense to
+  // stay in connectable mode as there is no one that can connect
+  if (msg.peer_count == 0 && drv->mode_requested == BLE_MODE_CONNECTABLE) {
+    drv->mode_requested = BLE_MODE_OFF;
+  }
+
+  // in case connection speed differs from request, send a command
+  if (msg.flags.high_speed != drv->high_speed) {
+    ble_send_speed_request(drv, drv->high_speed);
+  }
+
+  // in case power level differs from request, send a command
+  if ((ble_tx_power_level_t)msg.power_level != drv->power_level) {
+    ble_send_power_level_request(drv, drv->power_level);
+  }
+
+  drv->status_valid = true;
+}
+
+static void ble_process_rx_msg_pairing_request(const uint8_t *data,
+                                               uint32_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return;
+  }
+
+  if (len < 7) {
+    // insufficient data length
+    return;
+  }
+
+  if (drv->pairing_allowed == false) {
+    ble_send_pairing_reject(drv);
+    return;
+  }
+
+  ble_event_t event = {.type = BLE_PAIRING_REQUEST,
+                       .data_len = BLE_PAIRING_CODE_LEN};
+  memcpy(event.data, &data[1], BLE_PAIRING_CODE_LEN);
+  if (!tsqueue_enqueue(&drv->event_queue, (uint8_t *)&event, sizeof(event),
+                       NULL)) {
+    ble_send_pairing_reject(drv);
+  } else {
+    drv->pairing_requested = true;
+  }
+}
+
+static void ble_process_rx_msg_pairing_cancelled(const uint8_t *data,
+                                                 uint32_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return;
+  }
+
+  ble_event_t event = {.type = BLE_PAIRING_CANCELLED, .data_len = 0};
+  tsqueue_enqueue(&drv->event_queue, (uint8_t *)&event, sizeof(event), NULL);
+  ble_pairing_end(drv);
+}
+
+static void ble_process_rx_msg_pairing_completed(const uint8_t *data,
+                                                 uint32_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return;
+  }
+
+  ble_event_t event = {.type = BLE_PAIRING_COMPLETED, .data_len = 0};
+  tsqueue_enqueue(&drv->event_queue, (uint8_t *)&event, sizeof(event), NULL);
+  drv->pairing_allowed = false;
+  drv->pairing_requested = false;
+  drv->peer_count += 1;
+}
+
+static void ble_process_rx_msg_mac(const uint8_t *data, uint32_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return;
+  }
+
+  if (len < 1 + sizeof(drv->mac.addr)) {
+    // insufficient data length
+    return;
+  }
+
+  drv->mac_ready = true;
+  drv->mac.type = 0;
+  memcpy(&drv->mac.addr, &data[1], sizeof(drv->mac.addr));
+}
+
+static void ble_process_rx_msg_bond_list(const uint8_t *data, uint32_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return;
+  }
+
+  if (len < 2) {
+    return;
+  }
+
+  drv->bonds_ready = true;
+  drv->bond_count = data[1];
+  memcpy(&drv->bonds, &data[2], MIN(len - 2, sizeof(drv->bonds)));
+}
+
+static void ble_process_rx_msg(const uint8_t *data, uint32_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (len < 1) {
+    return;
+  }
+
+  switch (data[0]) {
+    case INTERNAL_EVENT_STATUS:
+      ble_process_rx_msg_status(data, len);
+      break;
+    case INTERNAL_EVENT_PAIRING_REQUEST:
+      ble_process_rx_msg_pairing_request(data, len);
+      break;
+    case INTERNAL_EVENT_PAIRING_CANCELLED:
+      ble_process_rx_msg_pairing_cancelled(data, len);
+      break;
+    case INTERNAL_EVENT_MAC:
+      ble_process_rx_msg_mac(data, len);
+      break;
+    case INTERNAL_EVENT_PAIRING_COMPLETED:
+      ble_process_rx_msg_pairing_completed(data, len);
+      break;
+    case INTERNAL_EVENT_BOND_LIST:
+      ble_process_rx_msg_bond_list(data, len);
+      break;
+    case INTERNAL_EVENT_SUCCESS:
+      drv->result_ready = true;
+      drv->result = true;
+      break;
+    case INTERNAL_EVENT_FAILURE:
+      drv->result_ready = true;
+      drv->result = false;
+      break;
+    default:
+      break;
+  }
+}
+
+static bool ble_connected_add_match(ble_driver_t *drv, const uint8_t *addr) {
+  return (addr[0] == drv->connected_addr.type &&
+          memcmp(&addr[1], drv->connected_addr.addr,
+                 sizeof(drv->connected_addr.addr)) == 0);
+}
+
+static void ble_process_data(const uint8_t *data, uint32_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized || !drv->enabled || !drv->accept_msgs) {
+    return;
+  }
+
+  if (len != BLE_DATA_SIZE) {
+    return;
+  }
+
+  if (!ble_connected_add_match(drv, data)) {
+    // inconsistent address of a connected device
+
+    drv->connected_addr.type = data[0];
+    memcpy(drv->connected_addr.addr, &data[1],
+           sizeof(drv->connected_addr.addr));
+
+    ble_event_t event = {.type = BLE_CONNECTION_CHANGED};
+    memcpy(event.data, drv->connected_addr.addr,
+           sizeof(drv->connected_addr.addr));
+    tsqueue_enqueue(&drv->event_queue, (uint8_t *)&event, sizeof(event), NULL);
+  }
+
+  tsqueue_enqueue(&drv->rx_queue, data, len, NULL);
+}
+
+// background loop, called from systimer every LOOP_PERIOD_MS
+static void ble_loop(void *context) {
+  ble_driver_t *drv = (ble_driver_t *)context;
+
+  if (!drv->initialized) {
+    return;
+  }
+
+  if (nrf_is_running()) {
+    if (drv->ping_cntr == 0) {
+      ble_send_state_request(drv);
+    }
+
+    drv->ping_cntr++;
+    if (drv->ping_cntr >= PING_PERIOD / LOOP_PERIOD_MS) {
+      drv->ping_cntr = 0;
+    }
+
+    uint8_t data[BLE_DATA_SIZE] = {0};
+    if (tsqueue_dequeue(&drv->tx_queue, data, BLE_DATA_SIZE, NULL, NULL)) {
+      if (!nrf_send_msg(NRF_SERVICE_BLE, data, BLE_DATA_SIZE, NULL, NULL)) {
+        tsqueue_enqueue(&drv->tx_queue, data, BLE_DATA_SIZE, NULL);
+      }
+    }
+
+    if (drv->accept_msgs && drv->busy_flag != 0) {
+      cmd_set_busy_t cmd = {
+          .cmd_id = INTERNAL_CMD_SET_BUSY,
+          .flag = 0,
+      };
+      nrf_send_msg(NRF_SERVICE_BLE_MANAGER, (uint8_t *)&cmd, sizeof(cmd), NULL,
+                   NULL);
+    }
+
+    if (!drv->accept_msgs && drv->busy_flag == 0) {
+      cmd_set_busy_t cmd = {
+          .cmd_id = INTERNAL_CMD_SET_BUSY,
+          .flag = 1,
+      };
+      nrf_send_msg(NRF_SERVICE_BLE_MANAGER, (uint8_t *)&cmd, sizeof(cmd), NULL,
+                   NULL);
+    }
+
+    if (drv->mode_current != drv->mode_requested) {
+      if (drv->mode_requested == BLE_MODE_OFF) {
+        ble_send_advertising_off(drv);
+        if (drv->connected) {
+          ble_send_disconnect(drv);
+        }
+      } else if (drv->mode_requested == BLE_MODE_KEEP_CONNECTION) {
+        ble_send_advertising_off(drv);
+      } else if (drv->mode_requested == BLE_MODE_CONNECTABLE) {
+        ble_send_advertising_on(drv, true);
+      } else if (drv->mode_requested == BLE_MODE_PAIRING) {
+        ble_send_advertising_on(drv, false);
+      }
+    }
+
+#ifdef USE_POWER_MANAGER
+    pm_state_t state = {0};
+    if (PM_OK == pm_get_state(&state)) {
+      if (state.soc != drv->soc || !drv->soc_send) {
+        ble_send_battery_update(state.soc);
+        drv->soc = state.soc;
+        drv->soc_send = true;
+      }
+    }
+#endif
+
+  } else {
+    drv->status_valid = false;
+  }
+}
+
+bool ble_init(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (drv->initialized) {
+    return true;
+  }
+
+  memset(drv, 0, sizeof(ble_driver_t));
+
+  tsqueue_init(&drv->event_queue, drv->event_queue_entries,
+               (uint8_t *)drv->event_queue_buffers, sizeof(ble_event_t),
+               EVENT_QUEUE_LEN);
+
+  tsqueue_init(&drv->rx_queue, drv->rx_queue_entries,
+               (uint8_t *)drv->rx_queue_buffers, BLE_DATA_SIZE, RX_QUEUE_LEN);
+
+  tsqueue_init(&drv->tx_queue, drv->ts_queue_entries,
+               (uint8_t *)drv->tx_queue_buffers, BLE_DATA_SIZE, TX_QUEUE_LEN);
+
+  drv->timer = systimer_create(ble_loop, drv);
+
+  if (drv->timer == NULL) {
+    goto cleanup;
+  }
+
+  systimer_set_periodic(drv->timer, LOOP_PERIOD_MS);
+
+  nrf_init();
+  if (!nrf_register_listener(NRF_SERVICE_BLE_MANAGER, ble_process_rx_msg)) {
+    goto cleanup;
+  }
+  if (!nrf_register_listener(NRF_SERVICE_BLE, ble_process_data)) {
+    goto cleanup;
+  }
+
+  if (!syshandle_register(SYSHANDLE_BLE, &ble_handle_vmt, drv)) {
+    goto cleanup;
+  }
+
+  if (!syshandle_register(SYSHANDLE_BLE_IFACE_0, &ble_iface_handle_vmt, drv)) {
+    goto cleanup;
+  }
+
+  drv->enabled = true;
+#ifdef USE_BACKUP_RAM
+  ble_recovery_data_t backup_data;
+  if (backup_ram_read(BACKUP_RAM_KEY_BLE_SETTINGS, &backup_data,
+                      sizeof(backup_data), NULL)) {
+    if (backup_data.version == 1) {
+      drv->enabled = backup_data.enabled;
+    }
+  }
+#endif
+
+  drv->power_level = BLE_TX_POWER_PLUS_4_DBM;
+  drv->initialized = true;
+  return true;
+
+cleanup:
+  if (drv->timer != NULL) {
+    systimer_delete(drv->timer);
+  }
+  nrf_deinit();
+  memset(drv, 0, sizeof(ble_driver_t));
+  return false;
+}
+
+static void ble_deinit_common(ble_driver_t *drv) {
+  if (!drv->initialized) {
+    return;
+  }
+
+  syshandle_unregister(SYSHANDLE_BLE_IFACE_0);
+  syshandle_unregister(SYSHANDLE_BLE);
+
+  nrf_unregister_listener(NRF_SERVICE_BLE);
+  nrf_unregister_listener(NRF_SERVICE_BLE_MANAGER);
+
+  systimer_delete(drv->timer);
+
+  tsqueue_reset(&drv->event_queue);
+  tsqueue_reset(&drv->rx_queue);
+  tsqueue_reset(&drv->tx_queue);
+}
+
+void ble_deinit(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (drv->initialized) {
+    ble_deinit_common(drv);
+    nrf_deinit();
+    drv->initialized = false;
+  }
+}
+
+void ble_suspend(ble_wakeup_params_t *wakeup_params) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  memset(wakeup_params, 0, sizeof(ble_wakeup_params_t));
+
+  if (drv->initialized) {
+    bool connected = drv->connected;
+    wakeup_params->accept_msgs = drv->accept_msgs;
+    wakeup_params->mode_requested = drv->mode_requested;
+    wakeup_params->peer_count = drv->peer_count;
+    wakeup_params->high_speed = drv->high_speed;
+    wakeup_params->next_adv_with_disconnect = drv->next_adv_with_disconnect;
+    wakeup_params->restart_adv_on_disconnect = drv->restart_adv_on_disconnect;
+    wakeup_params->static_mac = drv->static_mac;
+    wakeup_params->enabled = drv->enabled;
+    memcpy(wakeup_params->name, drv->adv_name, sizeof(drv->adv_name));
+    ble_deinit_common(drv);
+
+    if (!connected) {
+      wakeup_params->reboot_on_resume = true;
+      // if not connected, we can turn off the radio
+      nrf_system_off();
+      nrf_deinit();
+    } else {
+      irq_key_t key = irq_lock();
+      memcpy(&wakeup_params->connected_addr, &drv->connected_addr,
+             sizeof(drv->connected_addr));
+      irq_unlock(key);
+      nrf_suspend();
+    }
+
+    drv->initialized = false;
+  }
+}
+
+bool ble_resume(const ble_wakeup_params_t *wakeup_params) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!ble_init()) {
+    return false;
+  }
+
+  if (wakeup_params->reboot_on_resume) {
+    nrf_reboot();
+  } else {
+    nrf_resume();
+  }
+
+  irq_key_t key = irq_lock();
+
+  drv->peer_count = wakeup_params->peer_count;
+  drv->high_speed = wakeup_params->high_speed;
+  drv->static_mac = wakeup_params->static_mac;
+  drv->enabled = wakeup_params->enabled;
+
+  memcpy(&drv->connected_addr, &wakeup_params->connected_addr,
+         sizeof(drv->connected_addr));
+  memcpy(drv->adv_name, wakeup_params->name, sizeof(drv->adv_name));
+  drv->mode_requested = wakeup_params->mode_requested;
+  drv->next_adv_with_disconnect = wakeup_params->next_adv_with_disconnect;
+  drv->restart_adv_on_disconnect = wakeup_params->restart_adv_on_disconnect;
+
+  irq_unlock(key);
+
+  if (wakeup_params->accept_msgs) {
+    ble_start();
+  }
+
+  return true;
+}
+
+bool ble_connected(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  bool connected = drv->connected && nrf_is_running();
+
+  irq_unlock(key);
+
+  return connected;
+}
+
+void ble_start(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return;
+  }
+
+  irq_key_t key = irq_lock();
+
+  drv->accept_msgs = true;
+
+  irq_unlock(key);
+}
+
+void ble_stop(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return;
+  }
+
+  irq_key_t key = irq_lock();
+
+  drv->accept_msgs = false;
+  tsqueue_reset(&drv->rx_queue);
+
+  irq_unlock(key);
+}
+
+bool ble_can_write(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  if (!drv->connected || !drv->accept_msgs || !drv->enabled) {
+    irq_unlock(key);
+    return false;
+  }
+
+  bool full = !tsqueue_full(&drv->tx_queue);
+
+  irq_unlock(key);
+
+  return full;
+}
+
+bool ble_write(const uint8_t *data, uint16_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  if (len > BLE_TX_PACKET_SIZE) {
+    // `len` is sent on unclamped below, `tx_buf` is not that long
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  if (!drv->connected || !drv->accept_msgs || !drv->enabled) {
+    irq_unlock(key);
+    return false;
+  }
+
+  uint8_t tx_buf[BLE_DATA_SIZE];
+  tx_buf[0] = drv->connected_addr.type;
+  memcpy(&tx_buf[1], drv->connected_addr.addr,
+         sizeof(drv->connected_addr.addr));
+  memcpy(&tx_buf[BLE_DATA_HEADER_SIZE], data, len);
+
+  bool sent = nrf_send_msg(NRF_SERVICE_BLE, tx_buf, len + BLE_DATA_HEADER_SIZE,
+                           NULL, NULL);
+
+  if (!sent) {
+    bool queued = tsqueue_enqueue(&drv->tx_queue, tx_buf,
+                                  len + BLE_DATA_HEADER_SIZE, NULL);
+    irq_unlock(key);
+    return queued;
+  }
+
+  irq_unlock(key);
+  return true;
+}
+
+bool ble_can_read(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  bool result = !tsqueue_empty(&drv->rx_queue);
+
+  irq_unlock(key);
+
+  return result;
+}
+
+uint32_t ble_read(uint8_t *data, uint16_t max_len) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return 0;
+  }
+
+  if (max_len < BLE_RX_PACKET_SIZE) {
+    // the packet would not fit; leave it in the queue rather than drop it
+    return 0;
+  }
+
+  irq_key_t key = irq_lock();
+
+  tsqueue_t *queue = &drv->rx_queue;
+
+  uint16_t read_len = 0;
+
+  uint8_t rx_data[BLE_DATA_SIZE];
+
+  tsqueue_dequeue(queue, rx_data, sizeof(rx_data), &read_len, NULL);
+
+  if (read_len != BLE_DATA_SIZE) {
+    irq_unlock(key);
+    return 0;
+  }
+
+  // first 7 bytes is MAC, ignore for now
+  memcpy(data, &rx_data[BLE_DATA_HEADER_SIZE], BLE_RX_PACKET_SIZE);
+
+  irq_unlock(key);
+
+  return BLE_RX_PACKET_SIZE;
+}
+
+bool ble_switch_off(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  drv->restart_adv_on_disconnect = false;
+  drv->mode_requested = BLE_MODE_OFF;
+
+  irq_unlock(key);
+
+  return true;
+}
+
+bool ble_switch_on(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized || !drv->enabled) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  drv->restart_adv_on_disconnect = true;
+  if (drv->connected) {
+    drv->mode_requested = BLE_MODE_KEEP_CONNECTION;
+  } else {
+    drv->mode_requested = BLE_MODE_CONNECTABLE;
+  }
+
+  irq_unlock(key);
+
+  return true;
+}
+
+bool ble_set_static_mac(bool static_mac) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  drv->static_mac = static_mac;
+
+  irq_unlock(key);
+
+  return true;
+}
+
+static void ble_event_flush(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return;
+  }
+
+  irq_key_t key = irq_lock();
+
+  tsqueue_reset(&drv->event_queue);
+
+  irq_unlock(key);
+}
+
+bool ble_enter_pairing_mode(const uint8_t *name, size_t name_len) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized || !drv->enabled) {
+    return false;
+  }
+
+  if (name_len > BLE_ADV_NAME_LEN) {
+    return false;
+  }
+
+  if (name == NULL && name_len > 0) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  if (name != NULL && name_len > 0) {
+    memset(drv->adv_name, 0, sizeof(drv->adv_name));
+    memcpy(drv->adv_name, name, name_len);
+  }
+
+  drv->restart_adv_on_disconnect = true;
+  bool connected = drv->connected;
+
+  irq_unlock(key);
+
+  uint16_t retry_cnt = 0;
+
+  while (connected) {
+    retry_cnt++;
+    if (retry_cnt > 10) {
+      // too many retries, give up
+      return false;
+    }
+
+    ble_send_disconnect(drv);
+
+    systick_delay_ms(20);  // wait for disconnect to complete
+
+    key = irq_lock();
+    connected = drv->connected;
+    irq_unlock(key);
+  }
+
+  ble_event_flush();
+
+  key = irq_lock();
+
+  drv->mode_requested = BLE_MODE_PAIRING;
+
+  irq_unlock(key);
+
+  return true;
+}
+
+bool ble_disconnect(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  if (drv->connected && drv->restart_adv_on_disconnect) {
+    drv->next_adv_with_disconnect = true;
+  }
+
+  bool result = ble_send_disconnect(drv);
+
+  irq_unlock(key);
+
+  return result;
+}
+
+bool ble_erase_bonds(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+  bool result = ble_send_erase_bonds(drv);
+  irq_unlock(key);
+
+  return result;
+}
+
+bool ble_allow_pairing(const uint8_t *pairing_code) {
+  if (pairing_code == NULL) {
+    return false;
+  }
+
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+  bool result = ble_send_pairing_accept(drv, (uint8_t *)pairing_code);
+  irq_unlock(key);
+
+  return result;
+}
+
+bool ble_reject_pairing(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+  bool result = ble_send_pairing_reject(drv);
+  irq_unlock(key);
+
+  return result;
+}
+
+bool ble_keep_connection(void) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  drv->restart_adv_on_disconnect = false;
+  if (drv->connected) {
+    drv->mode_requested = BLE_MODE_KEEP_CONNECTION;
+  } else {
+    drv->mode_requested = BLE_MODE_OFF;
+  }
+
+  irq_unlock(key);
+
+  return true;
+}
+
+void ble_set_name(const uint8_t *name, size_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return;
+  }
+
+  if (len > BLE_ADV_NAME_LEN) {
+    return;
+  }
+
+  irq_key_t key = irq_lock();
+
+  memset(drv->adv_name, 0, sizeof(drv->adv_name));
+  memcpy(drv->adv_name, name, MIN(len, sizeof(drv->adv_name)));
+
+  if (drv->mode_requested == BLE_MODE_CONNECTABLE) {
+    ble_send_advertising_on(drv, true);
+  }
+
+  if (drv->mode_requested == BLE_MODE_PAIRING) {
+    ble_send_advertising_on(drv, false);
+  }
+
+  irq_unlock(key);
+}
+
+bool ble_get_event(ble_event_t *event) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+
+  bool result = tsqueue_dequeue(&drv->event_queue, (uint8_t *)event,
+                                sizeof(*event), NULL, NULL);
+
+  irq_unlock(key);
+
+  return result;
+}
+
+void ble_get_state(ble_state_t *state) {
+  const ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    memset(state, 0, sizeof(ble_state_t));
+    return;
+  }
+
+  irq_key_t key = irq_lock();
+
+  state->connected = drv->connected;
+  state->peer_count = drv->peer_count;
+  state->pairing = drv->mode_current == BLE_MODE_PAIRING;
+  state->connectable = drv->mode_current == BLE_MODE_CONNECTABLE;
+  state->pairing_requested = drv->pairing_requested;
+  state->state_known = drv->status_valid;
+  memcpy(&state->connected_addr, &drv->connected_addr,
+         sizeof(drv->connected_addr));
+
+  irq_unlock(key);
+}
+
+bool ble_get_mac(bt_le_addr_t *mac) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    memset(mac, 0, sizeof(*mac));
+    return false;
+  }
+
+  drv->mac_ready = false;
+
+  if (!ble_send_mac_request(drv)) {
+    return false;
+  }
+
+  uint32_t timeout = ticks_timeout(100);
+
+  while (!ticks_expired(timeout)) {
+    irq_key_t key = irq_lock();
+    if (drv->mac_ready) {
+      memcpy(mac, &drv->mac, sizeof(drv->mac));
+      irq_unlock(key);
+      return true;
+    }
+    irq_unlock(key);
+  }
+
+  memset(mac, 0, sizeof(*mac));
+  return false;
+}
+
+uint8_t ble_get_bond_list(bt_le_addr_t *bonds, size_t count) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized || count < BLE_MAX_BONDS) {
+    memset(bonds, 0, count * sizeof(bt_le_addr_t));
+    return 0;
+  }
+
+  drv->bonds_ready = false;
+
+  if (!ble_send_bond_list_request(drv)) {
+    return 0;
+  }
+
+  uint32_t timeout = ticks_timeout(100);
+
+  while (!ticks_expired(timeout)) {
+    irq_key_t key = irq_lock();
+    if (drv->bonds_ready) {
+      memcpy(bonds, &drv->bonds, sizeof(drv->bonds));
+      irq_unlock(key);
+      return drv->bond_count;
+    }
+    irq_unlock(key);
+  }
+
+  memset(bonds, 0, count * sizeof(bt_le_addr_t));
+  return 0;
+}
+
+void ble_get_advertising_name(char *name, size_t max_len) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (max_len < sizeof(drv->adv_name)) {
+    memset(name, 0, max_len);
+    return;
+  }
+
+  if (!drv->initialized) {
+    memset(name, 0, max_len);
+    return;
+  }
+
+  memcpy(name, drv->adv_name, sizeof(drv->adv_name));
+}
+
+bool ble_unpair(const bt_le_addr_t *addr) {
+  ble_driver_t *drv = &g_ble_driver;
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+  irq_key_t key = irq_lock();
+  drv->result_ready = false;
+  irq_unlock(key);
+
+  bool result;
+  if (addr == NULL) {
+    uint8_t cmd = INTERNAL_CMD_UNPAIR;
+    result =
+        nrf_send_msg(NRF_SERVICE_BLE_MANAGER, &cmd, sizeof(cmd), NULL, NULL);
+  } else {
+    uint8_t data[1 + sizeof(bt_le_addr_t)] = {0};
+    data[0] = INTERNAL_CMD_UNPAIR;
+    memcpy(&data[1], addr, sizeof(bt_le_addr_t));
+    result =
+        nrf_send_msg(NRF_SERVICE_BLE_MANAGER, data, sizeof(data), NULL, NULL);
+  }
+
+  if (!result) {
+    return false;
+  }
+
+  result = false;
+
+  uint32_t timeout = ticks_timeout(100);
+  while (!ticks_expired(timeout)) {
+    key = irq_lock();
+    if (drv->result_ready) {
+      result = drv->result;
+      irq_unlock(key);
+      return result;
+    }
+    irq_unlock(key);
+  }
+
+  return result;
+}
+
+void ble_set_high_speed(bool enable) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return;
+  }
+
+  irq_key_t key = irq_lock();
+  drv->high_speed = enable;
+  irq_unlock(key);
+}
+
+void ble_set_tx_power(ble_tx_power_level_t level) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return;
+  }
+
+  irq_key_t key = irq_lock();
+  drv->power_level = level;
+  irq_unlock(key);
+}
+
+void ble_notify(const uint8_t *data, size_t len) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return;
+  }
+
+  uint8_t cmd[32] = {0};
+  const size_t payload_len = MIN(len, sizeof(cmd) - 1);
+
+  cmd[0] = INTERNAL_CMD_NOTIFY;
+  memcpy(&cmd[1], data, payload_len);
+
+  nrf_send_msg(NRF_SERVICE_BLE_MANAGER, cmd, payload_len + 1, NULL, NULL);
+}
+
+void ble_set_enabled(bool enabled) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return;
+  }
+
+  if (!enabled) {
+    ble_switch_off();
+  }
+
+  drv->enabled = enabled;
+
+#ifdef USE_BACKUP_RAM
+  ble_recovery_data_t data = {.version = 1, .enabled = enabled};
+
+  backup_ram_write(BACKUP_RAM_KEY_BLE_SETTINGS, BACKUP_RAM_ITEM_PROTECTED,
+                   &data, sizeof(data));
+#endif
+}
+
+bool ble_get_enabled(void) {
+  ble_driver_t *drv = &g_ble_driver;
+  if (!drv->initialized) {
+    return false;
+  }
+  return drv->enabled;
+}
+
+static void on_ble_iface_event_poll(void *context, bool read_awaited,
+                                    bool write_awaited) {
+  UNUSED(context);
+
+  syshandle_t handle = SYSHANDLE_BLE_IFACE_0;
+
+  // Only one task can read or write at a time. Therefore, we can
+  // assume that only one task is waiting for events and keep the
+  // logic simple.
+
+  if (read_awaited && ble_can_read()) {
+    syshandle_signal_read_ready(handle, NULL);
+  }
+
+  if (write_awaited && ble_can_write()) {
+    syshandle_signal_write_ready(handle, NULL);
+  }
+}
+
+static bool on_ble_iface_read_ready(void *context, systask_id_t task_id,
+                                    void *param) {
+  UNUSED(context);
+  UNUSED(task_id);
+  UNUSED(param);
+
+  return ble_can_read();
+}
+
+static bool on_ble_iface_check_write_ready(void *context, systask_id_t task_id,
+                                           void *param) {
+  UNUSED(context);
+  UNUSED(task_id);
+  UNUSED(param);
+
+  return ble_can_write();
+}
+
+static const syshandle_vmt_t ble_iface_handle_vmt = {
+    .task_created = NULL,
+    .task_killed = NULL,
+    .check_read_ready = on_ble_iface_read_ready,
+    .check_write_ready = on_ble_iface_check_write_ready,
+    .poll = on_ble_iface_event_poll,
+};
+
+static void on_ble_poll(void *context, bool read_awaited, bool write_awaited) {
+  ble_driver_t *drv = (ble_driver_t *)context;
+
+  UNUSED(write_awaited);
+
+  // Until we need to poll BLE events from multiple tasks,
+  // the logic here can remain very simple. If this assumption
+  // changes, the logic will need to be updated (e.g., task-local storage
+  // with an independent queue for each task).
+
+  if (read_awaited) {
+    irq_key_t key = irq_lock();
+    bool queue_is_empty = tsqueue_empty(&drv->event_queue);
+    irq_unlock(key);
+
+    syshandle_signal_read_ready(SYSHANDLE_BLE, &queue_is_empty);
+  }
+}
+
+static bool on_ble_check_read_ready(void *context, systask_id_t task_id,
+                                    void *param) {
+  UNUSED(context);
+  UNUSED(task_id);
+
+  bool queue_is_empty = *(bool *)param;
+
+  return !queue_is_empty;
+}
+
+static const syshandle_vmt_t ble_handle_vmt = {
+    .task_created = NULL,
+    .task_killed = NULL,
+    .check_read_ready = on_ble_check_read_ready,
+    .check_write_ready = NULL,
+    .poll = on_ble_poll,
+};
+
+bool ble_wait_until_ready(void) {
+  uint32_t timeout = ticks_timeout(5000);
+  ble_state_t state = {0};
+  do {
+    ble_get_state(&state);
+    if (state.state_known) {
+      return true;
+    }
+  } while (!ticks_expired(timeout));
+
+  return false;
+}
+
+#endif

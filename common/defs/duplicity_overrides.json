@@ -1,0 +1,5 @@
+{
+    "erc20:eth:MATIC": false,
+    "erc20:eth:USDT": false,
+    "misc:USDT": false
+}

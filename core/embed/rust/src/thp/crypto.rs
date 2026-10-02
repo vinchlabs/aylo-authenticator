@@ -1,0 +1,251 @@
+use crypto::secret::HazardGuard;
+use crypto::{aesgcm, curve25519, sha256};
+use trezor_thp::channel::{Backend, Cipher, Hash, U8Array, DH};
+use zeroize::{Zeroize, Zeroizing};
+
+/// Array wrapper that zeroizes on `drop()`. Can't use zeroizing directly due to
+/// the orphan rule.
+pub struct Sensitive<A: U8Array + Zeroize>(Zeroizing<A>);
+
+impl<A: U8Array + Zeroize> Sensitive<A> {
+    pub fn from(a: A) -> Self {
+        Sensitive(Zeroizing::new(a))
+    }
+}
+
+impl<A> U8Array for Sensitive<A>
+where
+    A: Zeroize + U8Array,
+{
+    fn new() -> Self {
+        Sensitive::from(A::new())
+    }
+
+    fn new_with(v: u8) -> Self {
+        Sensitive::from(A::new_with(v))
+    }
+
+    fn from_slice(s: &[u8]) -> Self {
+        Sensitive::from(A::from_slice(s))
+    }
+
+    fn len() -> usize {
+        A::len()
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.0.as_mut()
+    }
+}
+
+pub struct TrezorCryptoCurve25519;
+
+impl DH for TrezorCryptoCurve25519 {
+    // Scalar & Point implement ZeroizeOnDrop, no need to wrap them.
+    type Key = curve25519::Scalar;
+    type Pubkey = curve25519::Point;
+    type Output = curve25519::Point;
+
+    fn name() -> &'static str {
+        "25519"
+    }
+
+    fn genkey() -> Self::Key {
+        let mut bytes = [0u8; curve25519::CURVE25519_KEY_SIZE];
+        crate::trezorhal::random::bytes(&mut bytes);
+        curve25519::Scalar::from_bytes(bytes)
+    }
+
+    fn pubkey(privkey: &Self::Key) -> Self::Pubkey {
+        curve25519::Point::from_secret(privkey)
+    }
+
+    fn dh(privkey: &Self::Key, pubkey: &Self::Pubkey) -> Result<Self::Output, ()> {
+        if pubkey.is_zero() {
+            return Err(());
+        }
+        let output = pubkey.multiply(privkey);
+        if output.is_zero() {
+            // `output` is zeroized on drop.
+            return Err(());
+        }
+        Ok(output)
+    }
+}
+
+pub struct TrezorCryptoAesGcm;
+
+impl TrezorCryptoAesGcm {
+    const KEY_SIZE: usize = 32;
+    const NONCE_SIZE: usize = 12;
+
+    fn full_nonce(nonce_counter: u64) -> [u8; Self::NONCE_SIZE] {
+        let mut full_nonce = [0u8; Self::NONCE_SIZE];
+        full_nonce[4..].copy_from_slice(&nonce_counter.to_be_bytes());
+        assert_eq!(&full_nonce[0..4], &[0u8; 4]);
+        full_nonce
+    }
+}
+
+impl Cipher for TrezorCryptoAesGcm {
+    fn name() -> &'static str {
+        "AESGCM"
+    }
+
+    type Key = Sensitive<[u8; Self::KEY_SIZE]>;
+
+    fn encrypt(key: &Self::Key, nonce: u64, ad: &[u8], plaintext: &[u8], out: &mut [u8]) {
+        assert!(plaintext.len().checked_add(aesgcm::TAG_SIZE) == Some(out.len()));
+
+        let full_nonce = Self::full_nonce(nonce);
+        let (in_out, tag_out) = out.split_at_mut(plaintext.len());
+        in_out.copy_from_slice(plaintext);
+
+        let mut ctx = aesgcm::AesGcmContext::default();
+        let mut ctx = unwrap!(aesgcm::AesGcmEncrypt::new(
+            &mut ctx,
+            key.as_slice(),
+            &full_nonce
+        ));
+        unwrap!(ctx.encrypt_in_place(in_out));
+        unwrap!(ctx.auth(ad));
+        let tag = unwrap!(ctx.finish());
+        tag_out.copy_from_slice(&tag);
+    }
+
+    fn encrypt_in_place(
+        key: &Self::Key,
+        nonce: u64,
+        ad: &[u8],
+        in_out: &mut [u8],
+        plaintext_len: usize,
+    ) -> usize {
+        assert!(plaintext_len
+            .checked_add(aesgcm::TAG_SIZE)
+            .is_some_and(|l| l <= in_out.len()));
+
+        let full_nonce = Self::full_nonce(nonce);
+        let (in_out, tag_out) =
+            in_out[..plaintext_len + aesgcm::TAG_SIZE].split_at_mut(plaintext_len);
+
+        let mut ctx = aesgcm::AesGcmContext::default();
+        let mut ctx = unwrap!(aesgcm::AesGcmEncrypt::new(
+            &mut ctx,
+            key.as_slice(),
+            &full_nonce
+        ));
+        unwrap!(ctx.encrypt_in_place(in_out));
+        unwrap!(ctx.auth(ad));
+        let tag = unwrap!(ctx.finish());
+        tag_out.copy_from_slice(&tag);
+
+        plaintext_len + aesgcm::TAG_SIZE
+    }
+
+    fn decrypt(
+        key: &Self::Key,
+        nonce: u64,
+        ad: &[u8],
+        ciphertext: &[u8],
+        out: &mut [u8],
+    ) -> Result<(), ()> {
+        assert!(ciphertext.len().checked_sub(aesgcm::TAG_SIZE) == Some(out.len()));
+
+        let full_nonce = Self::full_nonce(nonce);
+        let (ciphertext, tag) = unwrap!(ciphertext.split_last_chunk::<{ aesgcm::TAG_SIZE }>());
+        out.copy_from_slice(ciphertext);
+
+        let mut ctx = aesgcm::AesGcmContext::default();
+        let mut ctx = unwrap!(aesgcm::AesGcmDecrypt::new(
+            &mut ctx,
+            key.as_slice(),
+            &full_nonce
+        ));
+        unwrap!(ctx.decrypt_in_place(out));
+        unwrap!(ctx.auth(ad));
+        ctx.finish(tag).map_err(|_| out.zeroize())?;
+
+        Ok(())
+    }
+
+    fn decrypt_in_place(
+        key: &Self::Key,
+        nonce: u64,
+        ad: &[u8],
+        in_out: &mut [u8],
+        ciphertext_len: usize,
+    ) -> Result<usize, ()> {
+        assert!(ciphertext_len <= in_out.len());
+        assert!(ciphertext_len >= aesgcm::TAG_SIZE);
+
+        let full_nonce = Self::full_nonce(nonce);
+        let in_out = &mut in_out[..ciphertext_len];
+        let (in_out, tag) = unwrap!(in_out.split_last_chunk_mut::<{ aesgcm::TAG_SIZE }>());
+
+        let mut ctx = aesgcm::AesGcmContext::default();
+        let mut ctx = unwrap!(aesgcm::AesGcmDecrypt::new(
+            &mut ctx,
+            key.as_slice(),
+            &full_nonce
+        ));
+        unwrap!(ctx.decrypt_in_place(in_out));
+        unwrap!(ctx.auth(ad));
+        ctx.finish(tag).map_err(|_| in_out.zeroize())?;
+
+        Ok(in_out.len())
+    }
+}
+
+pub struct TrezorCryptoSha256(sha256::Sha256Ctx);
+
+impl Hash for TrezorCryptoSha256 {
+    fn name() -> &'static str {
+        "SHA256"
+    }
+
+    type Block = Sensitive<[u8; sha256::BLOCK_SIZE]>;
+    type Output = Sensitive<sha256::Digest>;
+
+    fn input(&mut self, data: &[u8]) {
+        // COPY HAZARD: Hazardous!
+        //
+        // This struct breaks the assumption that the hasher's inner state
+        // cannot be copied around. We have to live with that here, because we
+        // can't put the storage on the heap, so it needs to be owned, which
+        // prevents us from creating a safe interface.
+        let mut guard = HazardGuard::hazard_new(&mut self.0);
+        guard.update(data);
+    }
+
+    fn result(&mut self) -> Self::Output {
+        // COPY HAZARD: Hazardous! (see `input()` above for details)
+        let mut guard = HazardGuard::hazard_new(&mut self.0);
+        let digest = guard.finalize();
+        Self::Output::from_slice(&digest)
+    }
+}
+
+impl Default for TrezorCryptoSha256 {
+    fn default() -> Self {
+        let mut ctx = sha256::Sha256Ctx::default();
+        // COPY HAZARD: init is a public operation
+        ctx.hazard_mut().init();
+        Self(ctx)
+    }
+}
+
+pub struct TrezorCrypto;
+
+impl Backend for TrezorCrypto {
+    type DH = TrezorCryptoCurve25519;
+    type Cipher = TrezorCryptoAesGcm;
+    type Hash = TrezorCryptoSha256;
+
+    fn random_bytes(dest: &mut [u8]) {
+        crate::trezorhal::random::bytes(dest);
+    }
+}

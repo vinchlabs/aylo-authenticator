@@ -1,0 +1,252 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import pytest
+
+from trezorlib import device, messages
+from trezorlib.debuglink import DebugSession as Session
+from trezorlib.debuglink import TrezorTestContext
+from trezorlib.tools import parse_path
+
+from ...common import MNEMONIC12, get_test_address
+
+PIN4 = "1234"
+PIN6 = "789456"
+
+pytestmark = [
+    pytest.mark.models("legacy"),
+    pytest.mark.setup_client(uninitialized=True),
+]
+
+
+def test_pin_passphrase(test_ctx: TrezorTestContext):
+    session = test_ctx.get_seedless_session()
+
+    # `ScrambledWords` is disabled by default for shorter mnemonics.
+    device.apply_settings(
+        session, safety_checks=messages.SafetyCheckLevel.PromptTemporarily
+    )
+
+    debug = session.debug
+    mnemonic = MNEMONIC12.split(" ")
+    ret = session.call_raw(
+        messages.RecoveryDevice(
+            word_count=12,
+            passphrase_protection=True,
+            pin_protection=True,
+            label="label",
+            enforce_wordlist=True,
+        )
+    )
+
+    # click through confirmation
+    assert isinstance(ret, messages.ButtonRequest)
+    debug.press_yes()
+    ret = session.call_raw(messages.ButtonAck())
+
+    assert isinstance(ret, messages.PinMatrixRequest)
+
+    # Enter PIN for first time
+    pin_encoded = debug.encode_pin(PIN6)
+    ret = session.call_raw(messages.PinMatrixAck(pin=pin_encoded))
+    assert isinstance(ret, messages.PinMatrixRequest)
+
+    # Enter PIN for second time
+    pin_encoded = debug.encode_pin(PIN6)
+    ret = session.call_raw(messages.PinMatrixAck(pin=pin_encoded))
+
+    fakes = 0
+    for _ in range(int(12 * 2)):
+        assert isinstance(ret, messages.WordRequest)
+        word, pos = debug.read_recovery_word()
+
+        if pos != 0:
+            ret = session.call_raw(messages.WordAck(word=mnemonic[pos - 1]))
+            mnemonic[pos - 1] = None
+        else:
+            ret = session.call_raw(messages.WordAck(word=word))
+            fakes += 1
+
+    # Workflow succesfully ended
+    assert isinstance(ret, messages.Success)
+
+    # 12 expected fake words and all words of mnemonic are used
+    assert fakes == 12
+    assert mnemonic == [None] * 12
+
+    # Mnemonic is the same
+    assert debug.state().mnemonic_secret == MNEMONIC12.encode()
+
+    with test_ctx:
+        test_ctx.set_expected_responses(
+            [
+                # -> Initialize
+                messages.Features,
+                # -> GetPublicKey (via `derive()`)
+                messages.PassphraseRequest,
+                # -> PassphraseAck (via `derive()`)
+                messages.PublicKey,
+                # -> GetFeatures (via `refresh_features()` via `derive()`)
+                messages.Features,
+                # -> GetAddress (below)
+                messages.Address,
+            ]
+        )
+        session = test_ctx.get_session()
+        assert session.features.pin_protection is True
+        assert session.features.passphrase_protection is True
+        # Do passphrase-protected action, PassphraseRequest should be raised
+        get_test_address(session)
+
+
+def test_nopin_nopassphrase(test_ctx: TrezorTestContext):
+    session = test_ctx.get_seedless_session()
+
+    # `ScrambledWords` is disabled by default for shorter mnemonics.
+    device.apply_settings(
+        session, safety_checks=messages.SafetyCheckLevel.PromptTemporarily
+    )
+
+    mnemonic = MNEMONIC12.split(" ")
+    ret = session.call_raw(
+        messages.RecoveryDevice(
+            word_count=12,
+            passphrase_protection=False,
+            pin_protection=False,
+            label="label",
+            enforce_wordlist=True,
+        )
+    )
+
+    # click through confirmation
+    assert isinstance(ret, messages.ButtonRequest)
+    debug = session.debug
+    debug.press_yes()
+    ret = session.call_raw(messages.ButtonAck())
+
+    fakes = 0
+    for _ in range(int(12 * 2)):
+        assert isinstance(ret, messages.WordRequest)
+        word, pos = debug.read_recovery_word()
+
+        if pos != 0:
+            ret = session.call_raw(messages.WordAck(word=mnemonic[pos - 1]))
+            mnemonic[pos - 1] = None
+        else:
+            ret = session.call_raw(messages.WordAck(word=word))
+            fakes += 1
+
+    # Workflow succesfully ended
+    assert isinstance(ret, messages.Success)
+
+    # 12 expected fake words and all words of mnemonic are used
+    assert fakes == 12
+    assert mnemonic == [None] * 12
+
+    # Mnemonic is the same
+    assert debug.state().mnemonic_secret == MNEMONIC12.encode()
+
+    session = test_ctx.get_session()
+    assert session.features.pin_protection is False
+    assert session.features.passphrase_protection is False
+
+    # Do pin & passphrase-protected action, PassphraseRequest should NOT be raised
+    resp = session.call_raw(
+        messages.GetAddress(address_n=parse_path("m/44'/0'/0'/0/0"))
+    )
+    assert isinstance(resp, messages.Address)
+
+
+def test_word_fail(session: Session):
+    debug = session.debug
+    ret = session.call_raw(
+        messages.RecoveryDevice(
+            word_count=24,
+            passphrase_protection=False,
+            pin_protection=False,
+            label="label",
+            enforce_wordlist=True,
+        )
+    )
+
+    # click through confirmation
+    assert isinstance(ret, messages.ButtonRequest)
+    debug.press_yes()
+    ret = session.call_raw(messages.ButtonAck())
+
+    assert isinstance(ret, messages.WordRequest)
+    for _ in range(int(24 * 2)):
+        word, pos = debug.read_recovery_word()
+        if pos != 0:
+            ret = session.call_raw(messages.WordAck(word="kwyjibo"))
+            assert isinstance(ret, messages.Failure)
+            break
+        else:
+            session.call_raw(messages.WordAck(word=word))
+
+
+def test_pin_fail(session: Session):
+    debug = session.debug
+    ret = session.call_raw(
+        messages.RecoveryDevice(
+            word_count=24,
+            passphrase_protection=True,
+            pin_protection=True,
+            label="label",
+            enforce_wordlist=True,
+        )
+    )
+
+    # click through confirmation
+    assert isinstance(ret, messages.ButtonRequest)
+    debug.press_yes()
+    ret = session.call_raw(messages.ButtonAck())
+
+    assert isinstance(ret, messages.PinMatrixRequest)
+
+    # Enter PIN for first time
+    pin_encoded = debug.encode_pin(PIN4)
+    ret = session.call_raw(messages.PinMatrixAck(pin=pin_encoded))
+    assert isinstance(ret, messages.PinMatrixRequest)
+
+    # Enter PIN for second time, but different one
+    pin_encoded = debug.encode_pin(PIN6)
+    ret = session.call_raw(messages.PinMatrixAck(pin=pin_encoded))
+
+    # Failure should be raised
+    assert isinstance(ret, messages.Failure)
+
+
+@pytest.mark.setup_client(uninitialized=False)
+def test_already_initialized(session: Session):
+    with pytest.raises(RuntimeError):
+        device.recover(
+            session,
+            word_count=24,
+            pin_protection=False,
+            passphrase_protection=False,
+            label="label",
+            input_callback=session.test_ctx.mnemonic_callback,
+        )
+
+    ret = session.call_raw(
+        messages.RecoveryDevice(
+            word_count=24,
+            input_method=messages.RecoveryDeviceInputMethod.ScrambledWords,
+        )
+    )
+    assert isinstance(ret, messages.Failure)
+    assert "Device is already initialized" in ret.message

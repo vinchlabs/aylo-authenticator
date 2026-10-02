@@ -1,0 +1,98 @@
+# flake8: noqa: F403,F405
+from common import *  # isort:skip
+
+from trezor.crypto import bip39
+from trezor.wire import DataError
+
+from apps.common.keychain import ForbiddenKeyPath, Keychain
+from apps.common.paths import address_n_slip21_to_str
+from apps.common.seed import Slip21Node
+
+
+class TestSeed(unittest.TestCase):
+    def test_slip21(self):
+        seed = bip39.seed(" ".join(["all"] * 12), "")
+        node1 = Slip21Node(seed)
+        node2 = node1.clone()
+        keychain = Keychain(seed, "", [], slip21_namespaces=[[b"SLIP-0021"]])
+
+        # Key(m)
+        KEY_M = bytes.fromhex(
+            "dbf12b44133eaab506a740f6565cc117228cbf1dd70635cfa8ddfdc9af734756"
+        )
+        self.assertEqual(node1.key(), KEY_M)
+
+        # Key(m/"SLIP-0021")
+        KEY_M_SLIP0021 = bytes.fromhex(
+            "1d065e3ac1bbe5c7fad32cf2305f7d709dc070d672044a19e610c77cdf33de0d"
+        )
+        node1.derive_path([b"SLIP-0021"])
+        self.assertEqual(node1.key(), KEY_M_SLIP0021)
+        self.assertEqual(keychain.derive_slip21([b"SLIP-0021"]).key(), KEY_M_SLIP0021)
+
+        # Key(m/"SLIP-0021"/"Master encryption key")
+        KEY_M_SLIP0021_MEK = bytes.fromhex(
+            "ea163130e35bbafdf5ddee97a17b39cef2be4b4f390180d65b54cf05c6a82fde"
+        )
+        node1.derive_path([b"Master encryption key"])
+        self.assertEqual(node1.key(), KEY_M_SLIP0021_MEK)
+        self.assertEqual(
+            keychain.derive_slip21([b"SLIP-0021", b"Master encryption key"]).key(),
+            KEY_M_SLIP0021_MEK,
+        )
+
+        # Key(m/"SLIP-0021"/"Authentication key")
+        KEY_M_SLIP0021_AK = bytes.fromhex(
+            "47194e938ab24cc82bfa25f6486ed54bebe79c40ae2a5a32ea6db294d81861a6"
+        )
+        node2.derive_path([b"SLIP-0021", b"Authentication key"])
+        self.assertEqual(node2.key(), KEY_M_SLIP0021_AK)
+        self.assertEqual(
+            keychain.derive_slip21([b"SLIP-0021", b"Authentication key"]).key(),
+            KEY_M_SLIP0021_AK,
+        )
+
+        # Forbidden paths.
+        with self.assertRaises(ForbiddenKeyPath):
+            keychain.derive_slip21([])
+        with self.assertRaises(ForbiddenKeyPath):
+            keychain.derive_slip21([b"SLIP-9999", b"Authentication key"])
+
+        # Verify that ForbiddenKeyPath is a subclass of DataError
+        self.assertTrue(issubclass(ForbiddenKeyPath, DataError))
+
+    def test_slip21_to_str(self):
+        # Empty path is "m"
+        self.assertEqual(address_n_slip21_to_str([]), "m")
+
+        # Normal-use path
+        self.assertEqual(
+            address_n_slip21_to_str([b"SLIP-0021", b"Authentication key"]),
+            "m/SLIP-0021/Authentication key",
+        )
+
+        # Path with "/" and "\" - escaped as "\/" and "\\" respectively
+        label = b" \\ peace / among / worlds \\"
+        self.assertEqual(
+            address_n_slip21_to_str([label, label, label]),
+            "m/ \\\\ peace \\/ among \\/ worlds \\\\/ \\\\ peace \\/ among \\/ worlds \\\\/ \\\\ peace \\/ among \\/ worlds \\\\",
+        )
+
+        # Paths with non-ASCII-printable bytes - escaped as \xNN
+        self.assertEqual(
+            address_n_slip21_to_str([b"\x00"]),
+            "m/\\x00",
+        )
+        self.assertEqual(
+            address_n_slip21_to_str([b"\x00\x01\x80\xff pass"]),
+            "m/\\x00\\x01\\x80\\xff pass",
+        )
+        label = bytes("řeřicha", "utf-8")
+        self.assertEqual(
+            address_n_slip21_to_str([label, label, label]),
+            "m/\\xc5\\x99e\\xc5\\x99icha/\\xc5\\x99e\\xc5\\x99icha/\\xc5\\x99e\\xc5\\x99icha",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

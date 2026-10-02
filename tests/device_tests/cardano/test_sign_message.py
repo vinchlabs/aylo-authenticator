@@ -1,0 +1,67 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import pytest
+
+from trezorlib import cardano, messages, tools
+from trezorlib.debuglink import DebugSession as Session
+from trezorlib.exceptions import TrezorFailure
+
+from ...common import parametrize_using_common_fixtures
+
+pytestmark = [
+    pytest.mark.altcoin,
+    pytest.mark.cardano,
+    pytest.mark.models("core"),
+]
+
+
+@parametrize_using_common_fixtures("cardano/sign_message.json")
+def test_cardano_sign_message(session: Session, parameters, result):
+    response = call_sign_message(session, parameters)
+    assert response == _transform_expected_result(result)
+
+
+@parametrize_using_common_fixtures("cardano/sign_message.failed.json")
+def test_cardano_sign_message_failed(session: Session, parameters, result):
+    with pytest.raises(TrezorFailure, match=result["error_message"]):
+        call_sign_message(session, parameters)
+
+
+def call_sign_message(
+    session: Session,
+    parameters,
+) -> messages.CardanoMessageSignature:
+    with session.test_ctx:
+        return cardano.sign_message(
+            session=session,
+            payload=bytes.fromhex(parameters["payload"]),
+            prefer_hex_display=parameters["prefer_hex_display"],
+            signing_path=tools.parse_path(parameters["signing_path"]),
+            address_parameters=cardano.parse_optional_address_parameters(
+                parameters.get("address_parameters")
+            ),
+            protocol_magic=parameters.get("protocol_magic"),
+            network_id=parameters.get("network_id"),
+        )
+
+
+def _transform_expected_result(result: dict) -> messages.CardanoMessageSignature:
+    return messages.CardanoMessageSignature(
+        signature=bytes.fromhex(result["signature"]),
+        address=bytes.fromhex(result["address"]),
+        pub_key=bytes.fromhex(result["pub_key"]),
+    )

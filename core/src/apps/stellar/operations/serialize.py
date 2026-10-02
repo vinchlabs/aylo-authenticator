@@ -1,0 +1,288 @@
+from typing import TYPE_CHECKING
+
+from trezor.wire import DataError, ProcessError
+
+from ..writers import (
+    write_asset,
+    write_asset_code,
+    write_bool,
+    write_bytes_fixed,
+    write_create_contract_args_v2,
+    write_int64,
+    write_invoke_contract_args,
+    write_pubkey,
+    write_sc_address,
+    write_sc_val,
+    write_soroban_authorized_invocation,
+    write_string,
+    write_uint32,
+    write_uint64,
+    write_vec,
+)
+
+if TYPE_CHECKING:
+    from buffer_types import AnyBytes
+
+    from trezor.messages import (
+        StellarAccountMergeOp,
+        StellarAllowTrustOp,
+        StellarBumpSequenceOp,
+        StellarChangeTrustOp,
+        StellarClaimClaimableBalanceOp,
+        StellarCreateAccountOp,
+        StellarCreatePassiveSellOfferOp,
+        StellarHostFunction,
+        StellarInvokeHostFunctionOp,
+        StellarManageBuyOfferOp,
+        StellarManageDataOp,
+        StellarManageSellOfferOp,
+        StellarPathPaymentStrictReceiveOp,
+        StellarPathPaymentStrictSendOp,
+        StellarPaymentOp,
+        StellarSetOptionsOp,
+        StellarSorobanAddressCredentials,
+        StellarSorobanAddressCredentialsWithDelegates,
+        StellarSorobanAuthorizationEntry,
+        StellarSorobanCredentials,
+        StellarSorobanDelegateSignature,
+    )
+    from trezor.utils import Writer
+
+
+def write_account_merge_op(w: Writer, msg: StellarAccountMergeOp) -> None:
+    write_pubkey(w, msg.destination_account)
+
+
+def write_allow_trust_op(w: Writer, msg: StellarAllowTrustOp) -> None:
+    # trustor account (the account being allowed to access the asset)
+    write_pubkey(w, msg.trusted_account)
+    write_uint32(w, msg.asset_type)
+    write_asset_code(w, msg.asset_type, msg.asset_code)
+
+    write_bool(w, msg.is_authorized)
+
+
+def write_bump_sequence_op(w: Writer, msg: StellarBumpSequenceOp) -> None:
+    write_uint64(w, msg.bump_to)
+
+
+def write_change_trust_op(w: Writer, msg: StellarChangeTrustOp) -> None:
+    write_asset(w, msg.asset)
+    write_uint64(w, msg.limit)
+
+
+def write_create_account_op(w: Writer, msg: StellarCreateAccountOp) -> None:
+    write_pubkey(w, msg.new_account)
+    write_uint64(w, msg.starting_balance)
+
+
+def write_create_passive_sell_offer_op(
+    w: Writer, msg: StellarCreatePassiveSellOfferOp
+) -> None:
+    write_asset(w, msg.selling_asset)
+    write_asset(w, msg.buying_asset)
+    write_uint64(w, msg.amount)
+    write_uint32(w, msg.price_n)
+    write_uint32(w, msg.price_d)
+
+
+def write_manage_data_op(w: Writer, msg: StellarManageDataOp) -> None:
+    written = write_string(w, msg.key)
+    if written > 64:
+        raise ProcessError("Stellar: max length of a key is 64 bytes")
+    write_bool(w, bool(msg.value))
+    if msg.value:
+        write_string(w, msg.value)
+
+
+def write_manage_buy_offer_op(w: Writer, msg: StellarManageBuyOfferOp) -> None:
+    _write_manage_offer_op_common(w, msg)
+
+
+def write_manage_sell_offer_op(w: Writer, msg: StellarManageSellOfferOp) -> None:
+    _write_manage_offer_op_common(w, msg)
+
+
+def _write_manage_offer_op_common(
+    w: Writer, msg: StellarManageSellOfferOp | StellarManageBuyOfferOp
+) -> None:
+    write_asset(w, msg.selling_asset)
+    write_asset(w, msg.buying_asset)
+    write_uint64(w, msg.amount)  # amount to sell / buy
+    write_uint32(w, msg.price_n)  # numerator
+    write_uint32(w, msg.price_d)  # denominator
+    write_uint64(w, msg.offer_id)
+
+
+def write_path_payment_strict_receive_op(
+    w: Writer, msg: StellarPathPaymentStrictReceiveOp
+) -> None:
+    write_asset(w, msg.send_asset)
+    write_uint64(w, msg.send_max)
+    write_pubkey(w, msg.destination_account)
+
+    write_asset(w, msg.destination_asset)
+    write_uint64(w, msg.destination_amount)
+    write_vec(w, msg.paths, write_asset)
+
+
+def write_path_payment_strict_send_op(
+    w: Writer, msg: StellarPathPaymentStrictSendOp
+) -> None:
+    write_asset(w, msg.send_asset)
+    write_uint64(w, msg.send_amount)
+    write_pubkey(w, msg.destination_account)
+
+    write_asset(w, msg.destination_asset)
+    write_uint64(w, msg.destination_min)
+    write_vec(w, msg.paths, write_asset)
+
+
+def write_payment_op(w: Writer, msg: StellarPaymentOp) -> None:
+    write_pubkey(w, msg.destination_account)
+    write_asset(w, msg.asset)
+    write_uint64(w, msg.amount)
+
+
+def write_set_options_op(w: Writer, msg: StellarSetOptionsOp) -> None:
+    # inflation destination
+    if msg.inflation_destination_account is None:
+        write_bool(w, False)
+    else:
+        write_bool(w, True)
+        write_pubkey(w, msg.inflation_destination_account)
+
+    # NOTE: saves 21 bytes compared to hardcoding the operations
+    for option in (
+        # clear flags
+        msg.clear_flags,
+        # set flags
+        msg.set_flags,
+        # account thresholds
+        msg.master_weight,
+        msg.low_threshold,
+        msg.medium_threshold,
+        msg.high_threshold,
+    ):
+        if option is None:
+            write_bool(w, False)
+        else:
+            write_bool(w, True)
+            write_uint32(w, option)
+
+    # home domain
+    if msg.home_domain is None:
+        write_bool(w, False)
+    else:
+        write_bool(w, True)
+        written = write_string(w, msg.home_domain)
+        if written > 32:
+            raise ProcessError("Stellar: max length of a home domain is 32 bytes")
+
+    # signer
+    if msg.signer_type is None:
+        write_bool(w, False)
+    else:
+        if msg.signer_key is None or msg.signer_weight is None:
+            raise DataError(
+                "Stellar: signer_type, signer_key, signer_weight must be set together"
+            )
+        write_bool(w, True)
+        write_uint32(w, msg.signer_type)
+        write_bytes_fixed(w, msg.signer_key, 32)
+        write_uint32(w, msg.signer_weight)
+
+
+def write_claim_claimable_balance_op(
+    w: Writer, msg: StellarClaimClaimableBalanceOp
+) -> None:
+    _write_claimable_balance_id(w, msg.balance_id)
+
+
+def write_account(w: Writer, source_account: str | None) -> None:
+    if source_account is None:
+        write_bool(w, False)
+    else:
+        write_bool(w, True)
+        write_pubkey(w, source_account)
+
+
+def _write_claimable_balance_id(w: Writer, claimable_balance_id: AnyBytes) -> None:
+    if len(claimable_balance_id) != 36:  # 4 bytes type + 32 bytes data
+        raise DataError("Stellar: invalid claimable balance id length")
+    if claimable_balance_id[:4] != b"\x00\x00\x00\x00":  # CLAIMABLE_BALANCE_ID_TYPE_V0
+        raise DataError("Stellar: invalid claimable balance id, unknown type")
+    write_bytes_fixed(w, claimable_balance_id, 36)
+
+
+def write_invoke_host_function_op(w: Writer, msg: StellarInvokeHostFunctionOp) -> None:
+    _write_host_function(w, msg.function)
+    write_vec(w, msg.auth, _write_soroban_authorization_entry)
+
+
+def _write_host_function(w: Writer, msg: StellarHostFunction) -> None:
+    from trezor.enums import StellarHostFunctionType
+
+    write_uint32(w, msg.type)
+    if msg.type == StellarHostFunctionType.HOST_FUNCTION_TYPE_INVOKE_CONTRACT:
+        if msg.invoke_contract is None:
+            raise DataError("Stellar: missing invoke_contract")
+        write_invoke_contract_args(w, msg.invoke_contract)
+    elif msg.type == StellarHostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2:
+        if msg.create_contract_v2 is None:
+            raise DataError("Stellar: missing create_contract_v2")
+        write_create_contract_args_v2(w, msg.create_contract_v2)
+    else:
+        raise ProcessError("Stellar: unsupported host function type")
+
+
+def _write_soroban_authorization_entry(
+    w: Writer, msg: StellarSorobanAuthorizationEntry
+) -> None:
+    _write_soroban_credentials(w, msg.credentials)
+    write_soroban_authorized_invocation(w, msg.root_invocation)
+
+
+def _write_soroban_credentials(w: Writer, msg: StellarSorobanCredentials) -> None:
+    from trezor.enums import StellarSorobanCredentialsType
+
+    write_uint32(w, msg.type)
+    if msg.type == StellarSorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT:
+        pass  # void
+    elif msg.type == StellarSorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS_V2:
+        if msg.address_v2 is None:
+            raise DataError("Stellar: missing address credentials")
+        _write_soroban_address_credentials(w, msg.address_v2)
+    elif (
+        msg.type
+        == StellarSorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS_WITH_DELEGATES
+    ):
+        if msg.address_with_delegates is None:
+            raise DataError("Stellar: missing address credentials with delegates")
+        _write_soroban_address_credentials_with_delegates(w, msg.address_with_delegates)
+    else:
+        raise ProcessError("Stellar: unsupported credentials type")
+
+
+def _write_soroban_address_credentials(
+    w: Writer, msg: StellarSorobanAddressCredentials
+) -> None:
+    write_sc_address(w, msg.address)
+    write_int64(w, msg.nonce)
+    write_uint32(w, msg.signature_expiration_ledger)
+    write_sc_val(w, msg.signature)
+
+
+def _write_soroban_address_credentials_with_delegates(
+    w: Writer, msg: StellarSorobanAddressCredentialsWithDelegates
+) -> None:
+    _write_soroban_address_credentials(w, msg.address_credentials)
+    write_vec(w, msg.delegates, _write_soroban_delegate_signature)
+
+
+def _write_soroban_delegate_signature(
+    w: Writer, msg: StellarSorobanDelegateSignature
+) -> None:
+    write_sc_address(w, msg.address)
+    write_sc_val(w, msg.signature)
+    write_vec(w, msg.nested_delegates, _write_soroban_delegate_signature)

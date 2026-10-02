@@ -1,0 +1,130 @@
+use crate::strutil::ShortString;
+use crate::ui::component::EventCtx;
+use crate::ui::util::ResultExt;
+
+/// Reified editing operations of `TextBox`.
+///
+/// Note: This does not contain all supported editing operations, only the ones
+/// we currently use.
+pub enum TextEdit {
+    ReplaceLast(char),
+    Append(char),
+}
+
+/// Wraps a character buffer of maximum length `L` and provides text editing
+/// operations over it. Text ops usually take a `EventCtx` to request a paint
+/// pass in case of any state modification.
+pub struct TextBox {
+    text: ShortString,
+}
+
+impl TextBox {
+    /// Create a new `TextBox` with content `text`.
+    pub fn new(text: &str, max_len: usize) -> Self {
+        let text = unwrap!(ShortString::try_from(text));
+        debug_assert!(text.capacity() >= max_len);
+        Self { text }
+    }
+
+    /// Create an empty `TextBox`.
+    pub fn empty(max_len: usize) -> Self {
+        Self::new("", max_len)
+    }
+
+    pub fn content(&self) -> &str {
+        &self.text
+    }
+
+    /// Length of the content in *bytes* (matches `std::String::len`). Use
+    /// `count()` for the number of characters.
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Number of *characters* in the content. O(n) in the byte length.
+    pub fn count(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// Returns the last character of the content as a string slice, if any.
+    /// Safe to use without knowing the byte width of the last UTF-8 sequence.
+    pub fn last_char_str(&self) -> Option<&str> {
+        self.text
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| &self.text[i..])
+    }
+
+    /// Delete the last character of content, if any.
+    pub fn delete_last(&mut self, ctx: &mut EventCtx) {
+        let changed = self.text.pop().is_some();
+        if changed {
+            ctx.request_paint();
+        }
+    }
+
+    /// Replaces the last character of the content with `ch`. If the content is
+    /// empty, `ch` is appended.
+    pub fn replace_last(&mut self, ctx: &mut EventCtx, ch: char) {
+        let previous = self.text.pop();
+        self.text
+            .push(ch)
+            .assert_if_debugging_ui("TextBox has zero capacity");
+        let changed = previous != Some(ch);
+        if changed {
+            ctx.request_paint();
+        }
+    }
+
+    /// Append `ch` at the end of the content.
+    pub fn append(&mut self, ctx: &mut EventCtx, ch: char) {
+        self.text.push(ch).assert_if_debugging_ui("TextBox is full");
+        ctx.request_paint();
+    }
+
+    /// Append `slice` at the end of the content.
+    pub fn append_slice(&mut self, ctx: &mut EventCtx, slice: &str) {
+        self.text
+            .push_str(slice)
+            .assert_if_debugging_ui("TextBox is full");
+        ctx.request_paint();
+    }
+
+    /// Replace the textbox content with `text`.
+    pub fn replace(&mut self, ctx: &mut EventCtx, text: &str) {
+        if self.text != text {
+            self.text.clear();
+            self.text
+                .push_str(text)
+                .assert_if_debugging_ui("TextBox is full");
+            ctx.request_paint();
+        }
+    }
+
+    /// Clear the textbox content.
+    pub fn clear(&mut self, ctx: &mut EventCtx) {
+        self.replace(ctx, "");
+    }
+
+    /// Apply a editing operation to the text buffer.
+    pub fn apply(&mut self, ctx: &mut EventCtx, edit: TextEdit) {
+        match edit {
+            TextEdit::ReplaceLast(char) => self.replace_last(ctx, char),
+            TextEdit::Append(char) => self.append(ctx, char),
+        }
+    }
+}
+
+// DEBUG-ONLY SECTION BELOW
+
+#[cfg(feature = "ui_debug")]
+impl crate::trace::Trace for TextBox {
+    fn trace(&self, t: &mut dyn crate::trace::Tracer) {
+        t.component("TextBox");
+        t.string("text", self.text.as_str().into());
+    }
+}

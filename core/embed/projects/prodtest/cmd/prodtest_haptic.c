@@ -1,0 +1,80 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifdef USE_HAPTIC
+
+#include <trezor_rtl.h>
+
+#include <io/haptic.h>
+#include <rtl/cli.h>
+
+#include "prodtest_error_codes.h"
+
+static void prodtest_haptic_test(cli_t* cli) {
+  uint32_t duration_ms = 0;  // ms
+  uint32_t amplitude = 100;  // default amplitude
+
+  ts_t status;
+
+  if (!cli_arg_uint32(cli, "duration", &duration_ms)) {
+    cli_error_arg(cli, "Expecting time in milliseconds.");
+    return;
+  }
+
+  if (cli_arg_count(cli) == 2) {
+    if (!cli_arg_uint32(cli, "amplitude", &amplitude) || amplitude > 100) {
+      cli_error_arg(cli, "Expecting amplitude value in range 0-100.");
+      return;
+    }
+  }
+
+  if (cli_arg_count(cli) > 3) {
+    cli_error_arg_count(cli);
+    return;
+  }
+
+  status = haptic_init();
+  if (ts_error(status)) {
+    cli_error(cli, PRODTEST_ERR_HAPTIC_INIT,
+              "Haptic driver initialization failed.");
+    return;
+  }
+
+  cli_trace(cli, "Running haptic feedback test for %d ms with amplitude %d ...",
+            duration_ms, amplitude);
+
+  status = haptic_play_custom(amplitude, duration_ms);
+  if (ts_error(status)) {
+    cli_error(cli, PRODTEST_ERR_HAPTIC_TEST, "Haptic feedback test failed.");
+    return;
+  }
+
+  cli_ok(cli, "");
+}
+
+// clang-format off
+
+PRODTEST_CLI_CMD(
+  .name = "haptic-test",
+  .func = prodtest_haptic_test,
+  .info = "Test the haptic feedback actuator",
+  .args = "<duration>[<amplitude>]"
+);
+
+#endif  // USE_HAPTIC

@@ -1,0 +1,583 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+from __future__ import annotations
+
+import logging
+import secrets
+import sys
+import typing as t
+
+import click
+import requests
+
+from .. import authentication, debuglink, device, exceptions, messages
+from ..tools import format_path
+from . import ChoiceType, ui, with_session
+
+if t.TYPE_CHECKING:
+    from ..client import Session
+    from . import TrezorConnection
+
+RECOVERY_DEVICE_INPUT_METHOD = {
+    "scrambled": messages.RecoveryDeviceInputMethod.ScrambledWords,
+    "matrix": messages.RecoveryDeviceInputMethod.Matrix,
+}
+
+BACKUP_TYPE = {
+    "bip39": messages.BackupType.Bip39,
+    "single": messages.BackupType.Slip39_Single_Extendable,
+    "shamir": messages.BackupType.Slip39_Basic,
+    "advanced": messages.BackupType.Slip39_Advanced,
+}
+
+BACKUP_METHOD = {
+    "display": messages.BackupMethod.Display,
+    "n1w1": messages.BackupMethod.N1W1,
+}
+
+SD_PROTECT_OPERATIONS = {
+    "on": messages.SdProtectOperationType.ENABLE,
+    "off": messages.SdProtectOperationType.DISABLE,
+    "refresh": messages.SdProtectOperationType.REFRESH,
+}
+
+LOG = logging.getLogger(__name__)
+
+
+@click.group(name="device")
+def cli() -> None:
+    """Device management commands - setup, recover seed, wipe, etc."""
+
+
+@cli.command()
+@click.option(
+    "-b",
+    "--bootloader",
+    help="Wipe device in bootloader mode. This also erases the firmware.",
+    is_flag=True,
+)
+@with_session(seedless=True)
+def wipe(session: "Session", bootloader: bool) -> None:
+    """Reset device to factory defaults and remove all private data."""
+    features = session.features
+    if bootloader:
+        if not features.bootloader_mode:
+            click.echo("Please switch your device to bootloader mode.")
+            sys.exit(1)
+        else:
+            click.echo("Wiping user data and firmware!")
+    else:
+        if features.bootloader_mode:
+            click.echo(
+                "Your device is in bootloader mode. This operation would also erase firmware."
+            )
+            click.echo(
+                'Specify "--bootloader" if that is what you want, or disconnect and reconnect device in normal mode.'
+            )
+            click.echo("Aborting.")
+            sys.exit(1)
+        else:
+            click.echo("Wiping user data!")
+
+    try:
+        device.wipe(session)
+    except exceptions.TrezorFailure as e:
+        click.echo("Action failed: {} {}".format(*e.args))
+        sys.exit(3)
+
+
+@cli.command()
+@click.option("-m", "--mnemonic", multiple=True)
+@click.option("-p", "--pin", default="")
+@click.option("-r", "--passphrase-protection", is_flag=True)
+@click.option("-l", "--label", default="")
+@click.option("-i", "--ignore-checksum", is_flag=True)
+@click.option("-s", "--slip0014", is_flag=True)
+@click.option("-a", "--academic", is_flag=True)
+@click.option("-b", "--needs-backup", is_flag=True)
+@click.option("-n", "--no-backup", is_flag=True)
+@with_session(seedless=True)
+def load(
+    session: "Session",
+    mnemonic: t.Sequence[str],
+    pin: str,
+    passphrase_protection: bool,
+    label: str,
+    ignore_checksum: bool,
+    slip0014: bool,
+    academic: bool,
+    needs_backup: bool,
+    no_backup: bool,
+) -> None:
+    """Upload seed and custom configuration to the device.
+
+    This functionality is only available in debug mode.
+    """
+    if sum((slip0014, academic, bool(mnemonic))) > 1:
+        raise click.ClickException("Cannot use the options -a, -m, and -s together.")
+
+    if slip0014:
+        mnemonic = [" ".join(["all"] * 12)]
+        if not label:
+            label = "SLIP-0014"
+    elif academic:
+        mnemonic = [
+            "academic again academic academic academic academic academic academic academic academic academic academic academic academic academic academic academic pecan provide remember"
+        ]
+        if not label:
+            label = "ACADEMIC"
+
+    try:
+        debuglink.load_device(
+            session,
+            mnemonic=list(mnemonic),
+            pin=pin,
+            passphrase_protection=passphrase_protection,
+            label=label,
+            skip_checksum=ignore_checksum,
+            needs_backup=needs_backup,
+            no_backup=no_backup,
+        )
+    except exceptions.TrezorFailure as e:
+        if e.code == messages.FailureType.UnexpectedMessage:
+            raise click.ClickException(
+                "Unrecognized message. Make sure your Trezor is using debug firmware."
+            )
+        else:
+            raise
+
+
+@cli.command()
+@click.option("-w", "--words", type=click.Choice(["12", "18", "24"]), default="24")
+@click.option("-e", "--expand", is_flag=True)
+@click.option("-p", "--pin-protection", is_flag=True)
+@click.option("-r", "--passphrase-protection", is_flag=True)
+@click.option("-l", "--label")
+@click.option("-u", "--u2f-counter", default=None, type=int)
+@click.option(
+    "-i",
+    "--input_method",
+    "-t",
+    "--type",
+    type=ChoiceType(RECOVERY_DEVICE_INPUT_METHOD),
+    default=None,
+)
+@click.option("-m", "--backup-method", type=ChoiceType(BACKUP_METHOD))
+@click.option("-d", "--dry-run", is_flag=True)
+@click.option("-b", "--unlock-repeated-backup", is_flag=True)
+@with_session(seedless=True)
+def recover(
+    session: "Session",
+    words: str,
+    expand: bool,
+    pin_protection: bool,
+    passphrase_protection: bool,
+    label: str | None,
+    u2f_counter: int,
+    input_method: messages.RecoveryDeviceInputMethod | None,
+    backup_method: messages.BackupMethod | None,
+    dry_run: bool,
+    unlock_repeated_backup: bool,
+) -> None:
+    """Start safe recovery workflow."""
+    word_count = int(words)
+    if input_method is None:
+        input_method = messages.RecoveryDeviceInputMethod.ScrambledWords
+        if word_count < 24:
+            # `ScrambledWords` is disabled by default for shorter mnemonics.
+            input_method = messages.RecoveryDeviceInputMethod.Matrix
+
+    if input_method == messages.RecoveryDeviceInputMethod.ScrambledWords:
+        input_callback = ui.mnemonic_words(expand)
+    else:
+        input_callback = ui.matrix_words
+        click.echo(ui.RECOVERY_MATRIX_DESCRIPTION)
+
+    if dry_run and unlock_repeated_backup:
+        raise click.ClickException("Cannot use -d and -b together.")
+
+    type = None
+    if dry_run:
+        type = messages.RecoveryType.DryRun
+    if unlock_repeated_backup:
+        type = messages.RecoveryType.UnlockRepeatedBackup
+
+    device.recover(
+        session,
+        word_count=word_count,
+        passphrase_protection=passphrase_protection,
+        pin_protection=pin_protection,
+        label=label,
+        u2f_counter=u2f_counter,
+        input_callback=input_callback,
+        input_method=input_method,
+        backup_method=backup_method,
+        type=type,
+    )
+
+
+@cli.command()
+@click.option("-t", "--strength", type=click.Choice(["128", "192", "256"]))
+@click.option("-r", "--passphrase-protection", is_flag=True)
+@click.option("-p", "--pin-protection", is_flag=True)
+@click.option("-l", "--label")
+@click.option("-u", "--u2f-counter", default=0)
+@click.option("-s", "--skip-backup", is_flag=True)
+@click.option("-n", "--no-backup", is_flag=True)
+@click.option("-b", "--backup-type", type=ChoiceType(BACKUP_TYPE))
+@click.option("-m", "--backup-method", type=ChoiceType(BACKUP_METHOD))
+@click.option("-e", "--entropy-check-count", type=click.IntRange(0))
+@with_session(seedless=True)
+def setup(
+    session: "Session",
+    strength: int | None,
+    passphrase_protection: bool,
+    pin_protection: bool,
+    label: str | None,
+    u2f_counter: int,
+    skip_backup: bool,
+    no_backup: bool,
+    backup_type: messages.BackupType | None,
+    backup_method: messages.BackupMethod | None,
+    entropy_check_count: int | None,
+) -> None:
+    """Perform device setup and generate new seed."""
+    if strength:
+        strength = int(strength)
+
+    BT = messages.BackupType
+
+    if (
+        backup_type
+        in (BT.Slip39_Single_Extendable, BT.Slip39_Basic, BT.Slip39_Basic_Extendable)
+        and messages.Capability.Shamir not in session.features.capabilities
+    ) or (
+        backup_type in (BT.Slip39_Advanced, BT.Slip39_Advanced_Extendable)
+        and messages.Capability.ShamirGroups not in session.features.capabilities
+    ):
+        click.echo(
+            "WARNING: Your Trezor device does not indicate support for the requested\n"
+            "backup type. Traditional BIP39 backup may be generated instead."
+        )
+
+    path_xpubs = device.setup(
+        session,
+        strength=strength,
+        passphrase_protection=passphrase_protection,
+        pin_protection=pin_protection,
+        label=label,
+        u2f_counter=u2f_counter,
+        skip_backup=skip_backup,
+        no_backup=no_backup,
+        backup_type=backup_type,
+        backup_method=backup_method,
+        entropy_check_count=entropy_check_count,
+    )
+
+    if path_xpubs:
+        click.echo("XPUBs for the generated seed")
+        for path, xpub in path_xpubs:
+            click.echo(f"{format_path(path)}: {xpub}")
+
+
+@cli.command()
+@click.option(
+    "-t",
+    "--group-threshold",
+    type=int,
+    help="How many groups are needed to recover the wallet.",
+)
+@click.option(
+    "-g",
+    "--group",
+    "groups",
+    type=(int, int),
+    multiple=True,
+    metavar="T N",
+    help="One group as 'T N' (threshold, member count). Repeat for each group (advanced Shamir only), "
+    "e.g. '-g 2 3 -g 1 1'.",
+)
+@click.option("-m", "--method", "method", type=ChoiceType(BACKUP_METHOD))
+@with_session(seedless=True)
+def backup(
+    session: "Session",
+    group_threshold: int | None = None,
+    groups: t.Sequence[tuple[int, int]] = (),
+    method: messages.BackupMethod = messages.BackupMethod.Display,
+) -> None:
+    """Perform device seed backup.
+
+    For an advanced Shamir backup with multiple groups, specify the group
+    threshold with -t and repeat -g for each group:
+
+    \b
+    trezorctl device backup -t 1 -g 2 3 -g 1 1
+
+    This creates two groups (a 2-of-3 and a 1-of-1 share group), of which 1
+    group is required to recover the wallet.
+    """
+
+    device.backup(session, group_threshold, groups, method)
+
+
+@cli.command()
+@click.argument("operation", type=ChoiceType(SD_PROTECT_OPERATIONS))
+@with_session(seedless=True)
+def sd_protect(session: "Session", operation: messages.SdProtectOperationType) -> None:
+    """Secure the device with SD card protection.
+
+    When SD card protection is enabled, a randomly generated secret is stored
+    on the SD card. During every PIN checking and unlocking operation this
+    secret is combined with the entered PIN value to decrypt data stored on
+    the device. The SD card will thus be needed every time you unlock the
+    device. The options are:
+
+    \b
+    on - Generate SD card secret and use it to protect the PIN and storage.
+    off - Remove SD card secret protection.
+    refresh - Replace the current SD card secret with a new one.
+    """
+    if session.features.model == "1":
+        raise click.ClickException("Trezor One does not support SD card protection.")
+    device.sd_protect(session, operation)
+
+
+@cli.command()
+@click.pass_obj
+def reboot_to_bootloader(obj: "TrezorConnection") -> None:
+    """Reboot device into bootloader mode."""
+    # avoid using @with_session because it closes the session afterwards,
+    # which triggers double prompt on device
+    with obj.client_context() as client:
+        device.reboot_to_bootloader(client.get_session(passphrase=None))
+
+
+@cli.command()
+@with_session(seedless=True)
+def tutorial(session: "Session") -> None:
+    """Show on-device tutorial."""
+    device.show_device_tutorial(session)
+
+
+@cli.command()
+@with_session(seedless=True)
+def unlock_bootloader(session: "Session") -> None:
+    """Unlocks bootloader. Irreversible."""
+    device.unlock_bootloader(session)
+
+
+@cli.command()
+@click.argument("enable", type=ChoiceType({"on": True, "off": False}), required=False)
+@click.option(
+    "-e",
+    "--expiry",
+    type=int,
+    help="Dialog expiry in seconds.",
+)
+@with_session(seedless=True)
+def set_busy(session: "Session", enable: bool | None, expiry: int | None) -> None:
+    """Show a "Do not disconnect" dialog."""
+    if enable is False:
+        device.set_busy(session, None)
+
+    if expiry is None:
+        raise click.ClickException("Missing option '-e' / '--expiry'.")
+
+    if expiry <= 0:
+        raise click.ClickException(
+            f"Invalid value for '-e' / '--expiry': '{expiry}' is not a positive integer."
+        )
+
+    device.set_busy(session, expiry * 1000)
+
+
+PUBKEY_ALLOWLIST_URL_TEMPLATE = (
+    "https://data.trezor.io/firmware/{model}/authenticity.json"
+)
+
+
+def _print_auth_data(signature: bytes, certificates: t.Sequence[bytes]) -> None:
+    click.echo(f"Signature of challenge: {signature.hex()}")
+    click.echo(f"Device certificate: {certificates[0].hex()}")
+    for cert in certificates[1:]:
+        click.echo(f"CA certificate: {cert.hex()}")
+
+
+@cli.command()
+@click.argument("hex_challenge", required=False)
+@click.option(
+    "-R", "--p256-root", type=click.File("rb"), help="Custom root P-256 public key."
+)
+@click.option(
+    "--ed25519-root", type=click.File("rb"), help="Custom root Ed25519 public key."
+)
+@click.option(
+    "--mldsa44-root", type=click.File("rb"), help="Custom root ML-DSA-44 public key."
+)
+@click.option(
+    "-r", "--raw", is_flag=True, help="Print raw cryptographic data and exit."
+)
+@click.option(
+    "-s",
+    "--offline",
+    is_flag=True,
+    help="Do not check intermediate certificates against the online whitelist/CRL.",
+)
+@click.option(
+    "-d",
+    "--devel",
+    is_flag=True,
+    help="Allow devices provisioned with development keys.",
+)
+@with_session(seedless=True)
+def authenticate(
+    session: "Session",
+    hex_challenge: str | None,
+    p256_root: t.BinaryIO | None,
+    ed25519_root: t.BinaryIO | None,
+    mldsa44_root: t.BinaryIO | None,
+    raw: bool | None,
+    offline: bool | None,
+    devel: bool | None,
+) -> None:
+    """Verify the authenticity of the device.
+
+    Use the --raw option to get the raw challenge, signature, and certificate data.
+
+    Otherwise, trezorctl will attempt to decode the signatures and check their
+    authenticity. By default, it will also check the public keys against a
+    whitelist or CRL downloaded from Trezor servers. You can skip this check
+    with the --offline option.
+
+    Development devices are rejected unless the --devel option is given.
+    """
+    if hex_challenge is None:
+        hex_challenge = secrets.token_hex(32)
+
+    challenge = bytes.fromhex(hex_challenge)
+
+    if raw:
+        msg = device.authenticate(session, challenge)
+
+        click.echo(f"Challenge: {hex_challenge}")
+        _print_auth_data(msg.optiga_signature, msg.optiga_certificates)
+        if msg.tropic_signature is not None:
+            _print_auth_data(msg.tropic_signature, msg.tropic_certificates)
+        if msg.mcu_signature is not None:
+            _print_auth_data(msg.mcu_signature, msg.mcu_certificates)
+        return
+
+    if p256_root is not None:
+        p256_root_bytes = p256_root.read()
+    else:
+        p256_root_bytes = None
+
+    if ed25519_root is not None:
+        ed25519_root_bytes = ed25519_root.read()
+    else:
+        ed25519_root_bytes = None
+
+    if mldsa44_root is not None:
+        mldsa44_root_bytes = mldsa44_root.read()
+    else:
+        mldsa44_root_bytes = None
+
+    class ColoredFormatter(logging.Formatter):
+        LEVELS = {
+            logging.ERROR: click.style("ERROR", fg="red"),
+            logging.WARNING: click.style("WARNING", fg="yellow"),
+            logging.INFO: click.style("INFO", fg="blue"),
+            logging.DEBUG: click.style("OK", fg="green"),
+        }
+
+        def format(self, record: logging.LogRecord) -> str:
+            prefix = self.LEVELS[record.levelno]
+            bold_args = tuple(
+                click.style(str(arg), bold=True) for arg in record.args or ()
+            )
+            return f"[{prefix}] {record.msg}" % bold_args
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(ColoredFormatter())
+    authentication.LOG.addHandler(handler)
+    authentication.LOG.setLevel(logging.DEBUG)
+
+    if offline:
+        allowlist = None
+    else:
+        req = requests.get(
+            PUBKEY_ALLOWLIST_URL_TEMPLATE.format(
+                model=session.model.internal_name.lower()
+            )
+        )
+        try:
+            req.raise_for_status()
+            allowlist = authentication.AllowList(req.json())
+        except Exception as e:
+            raise click.ClickException(
+                f"Failed to download allow list: {e}\nUse --offline to skip the check."
+            ) from e
+
+    try:
+        authentication.authenticate_device(
+            session,
+            challenge,
+            p256_root_pubkey=p256_root_bytes,
+            ed25519_root_pubkey=ed25519_root_bytes,
+            mldsa44_root_pubkey=mldsa44_root_bytes,
+            allowlist=allowlist,
+            allow_development_devices=devel,
+        )
+    except authentication.DeviceNotAuthentic:
+        click.echo("Device is not authentic.")
+        sys.exit(5)
+
+
+@cli.command()
+@with_session(seedless=True)
+def serial_number(session: "Session") -> str:
+    """Get serial number."""
+    return device.get_serial_number(session)
+
+
+@cli.command()
+@click.option("--all", is_flag=True, help="Forget all devices.")
+@click.pass_obj
+def forget(obj: "TrezorConnection", all: bool) -> None:
+    """Forget a THP pairing key.
+
+    Forgets the THP pairing key for the currently connected device.
+    Specify --all to forget all keys for all remembered Trezors.
+    """
+    from ..client import get_client
+    from ..thp.client import TrezorClientThp
+
+    if all:
+        obj.credentials.clear()
+        return
+
+    client = get_client(obj.app, obj.transport)
+    if not isinstance(client, TrezorClientThp):
+        LOG.warning("Connected device is not a THP device, nothing to forget.")
+        return
+
+    if not client.pairing.is_paired():
+        LOG.warning("Device is not paired, nothing to forget.")
+        return
+
+    assert client.channel.trezor_public_keys is not None
+    obj.credentials.delete(client.channel.trezor_public_keys)

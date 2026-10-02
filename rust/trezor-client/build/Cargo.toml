@@ -1,0 +1,9 @@
+[package]
+name = "trezor-client-build"
+version = "0.0.0"
+description = "Builds Trezor protobuf bindings for trezor-client"
+edition = "2021"
+publish = false
+
+[dependencies]
+protobuf-codegen.workspace = true

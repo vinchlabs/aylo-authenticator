@@ -1,0 +1,105 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <trezor_types.h>
+
+#include <io/ble.h>
+
+typedef struct {
+  uint8_t msg_id;
+  uint8_t connected;
+  uint8_t advertising;
+  uint8_t advertising_whitelist;
+
+  uint8_t peer_count;
+  uint8_t busy_flag;
+  struct {
+    bool bonded_connection : 1;
+    bool high_speed : 1;
+    uint8_t reserved : 6;
+  } flags;
+  uint8_t sd_version_number;
+
+  uint16_t sd_company_id;
+  uint16_t sd_subversion_number;
+
+  uint32_t app_version;
+  uint32_t bld_version;
+
+  uint8_t connected_addr[6];  // MAC address of the connected device
+  uint8_t connected_addr_type;
+
+  int8_t power_level;
+} event_status_msg_t;
+
+typedef enum {
+  INTERNAL_EVENT_STATUS = 0x01,
+  INTERNAL_EVENT_SUCCESS = 0x02,
+  INTERNAL_EVENT_FAILURE = 0x03,
+  INTERNAL_EVENT_PAIRING_REQUEST = 0x04,
+  INTERNAL_EVENT_PAIRING_CANCELLED = 0x05,
+  INTERNAL_EVENT_MAC = 0x06,
+  INTERNAL_EVENT_PAIRING_COMPLETED = 0x07,
+  INTERNAL_EVENT_BOND_LIST = 0x08,
+} internal_event_t;
+
+typedef enum {
+  INTERNAL_CMD_SEND_STATE = 0x00,
+  INTERNAL_CMD_ADVERTISING_ON = 0x01,
+  INTERNAL_CMD_ADVERTISING_OFF = 0x02,
+  INTERNAL_CMD_ERASE_BONDS = 0x03,
+  INTERNAL_CMD_DISCONNECT = 0x04,
+  INTERNAL_CMD_ACK = 0x05,
+  INTERNAL_CMD_ALLOW_PAIRING = 0x06,
+  INTERNAL_CMD_REJECT_PAIRING = 0x07,
+  INTERNAL_CMD_UNPAIR = 0x08,
+  INTERNAL_CMD_GET_MAC = 0x09,
+  INTERNAL_CMD_SET_BUSY = 0x0A,
+  INTERNAL_CMD_GET_BOND_LIST = 0x0B,
+  INTERNAL_CMD_SET_SPEED_HIGH = 0x0C,
+  INTERNAL_CMD_SET_SPEED_LOW = 0x0D,
+  INTERNAL_CMD_NOTIFY = 0x0E,
+  INTERNAL_CMD_BATTERY_UPDATE = 0x0F,
+  INTERNAL_CMD_SET_TX_POWER = 0x10,
+} internal_cmd_t;
+
+typedef struct {
+  uint8_t cmd_id;
+  struct {
+    uint8_t whitelist : 1;
+    uint8_t user_disconnect : 1;
+    uint8_t reserved : 6;
+  } flags;
+  uint8_t color;
+  uint8_t static_addr;
+  uint8_t device_code;
+  uint8_t name[BLE_ADV_NAME_LEN];
+} cmd_advertising_on_t;
+
+typedef struct {
+  uint8_t cmd_id;
+  uint8_t code[BLE_PAIRING_CODE_LEN];
+} cmd_allow_pairing_t;
+
+typedef struct {
+  uint8_t cmd_id;
+  uint8_t flag;
+} cmd_set_busy_t;

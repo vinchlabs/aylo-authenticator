@@ -1,0 +1,216 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#if !BITCOIN_ONLY
+
+#include "py/objstr.h"
+
+#include "../trezorobj.h"
+#include "hdnode.h"
+
+#include "bip39.h"
+#include "cardano.h"
+#include "curves.h"
+#include "memzero.h"
+
+/// package: trezorcrypto.cardano
+/// from trezorcrypto.bip32 import HDNode
+
+/// def derive_icarus(
+///     binary_mnemonic: bytes,
+///     passphrase: str,
+///     trezor_derivation: bool,
+///     callback: Callable[[int, int], None] | None = None,
+/// ) -> bytes:
+///     """
+///     Derives a Cardano master secret from a mnemonic represented in bits
+///     (including checksum) and a passphrase using the Icarus derivation
+///     scheme. If `trezor_derivation` is True, the Icarus-Trezor variant is
+///     used (see CIP-3).
+///     """
+static mp_obj_t mod_trezorcrypto_cardano_derive_icarus(size_t n_args,
+                                                       const mp_obj_t *args) {
+  mp_buffer_info_t binary_mnemonic = {0}, phrase = {0};
+  mp_get_buffer_raise(args[0], &binary_mnemonic, MP_BUFFER_READ);
+  mp_get_buffer_raise(args[1], &phrase, MP_BUFFER_READ);
+  const char *ppassphrase = phrase.len > 0 ? phrase.buf : "";
+
+  bool trezor_derivation = mp_obj_is_true(args[2]);
+
+  vstr_t vstr = {0};
+  vstr_init_len(&vstr, CARDANO_SECRET_LENGTH);
+
+  void (*callback)(uint32_t current, uint32_t total) = NULL;
+  if (n_args > 3) {
+    // generate with a progress callback
+    ui_wait_callback = args[3];
+    callback = wrapped_ui_wait_callback;
+  }
+
+  int checksum_bytes = (binary_mnemonic.len + 32) / 33;
+  int entropy_bytes = binary_mnemonic.len - checksum_bytes;
+  int mnemonic_bytes_used = 0;
+  if (!trezor_derivation) {
+    // Exclude checksum (original Icarus spec)
+    mnemonic_bytes_used = entropy_bytes;
+  } else {
+    // Include checksum if it is a full byte (Trezor bug)
+    // see also https://github.com/trezor/trezor-firmware/issues/1387 and CIP-3
+    mnemonic_bytes_used = entropy_bytes + (binary_mnemonic.len / 33);
+  }
+  const int res = secret_from_entropy_cardano_icarus(
+      (const uint8_t *)ppassphrase, phrase.len,
+      (const uint8_t *)binary_mnemonic.buf, mnemonic_bytes_used,
+      (uint8_t *)vstr.buf, callback);
+
+  ui_wait_callback = mp_const_none;
+
+  if (res != 1) {
+    mp_raise_msg(&mp_type_RuntimeError,
+                 MP_ERROR_TEXT("Unexpected failure in Icarus derivation."));
+  }
+
+  return mp_obj_new_bytes_from_vstr(&vstr);
+}
+
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(
+    mod_trezorcrypto_cardano_derive_icarus_obj, 3, 4,
+    mod_trezorcrypto_cardano_derive_icarus);
+
+/// def from_secret(secret: AnyBytes) -> HDNode:
+///     """
+///     Creates a Cardano HD node from a master secret.
+///     """
+static mp_obj_t mod_trezorcrypto_from_secret(mp_obj_t secret) {
+  mp_buffer_info_t bufinfo;
+  mp_get_buffer_raise(secret, &bufinfo, MP_BUFFER_READ);
+  if (bufinfo.len != CARDANO_SECRET_LENGTH) {
+    mp_raise_ValueError(MP_ERROR_TEXT("Invalid secret length"));
+  }
+
+  mp_obj_HDNode_t *o = mp_obj_malloc_with_finaliser(
+      mp_obj_HDNode_t, &mod_trezorcrypto_HDNode_type);
+  const int res = hdnode_from_secret_cardano(bufinfo.buf, &o->hdnode);
+  if (res != 1) {
+    m_del_obj(mp_obj_HDNode_t, o);
+    mp_raise_msg(
+        &mp_type_RuntimeError,
+        MP_ERROR_TEXT("Unexpected failure in constructing Cardano node."));
+  }
+  o->fingerprint = hdnode_fingerprint(&o->hdnode);
+  return MP_OBJ_FROM_PTR(o);
+}
+
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_trezorcrypto_from_secret_obj,
+                                 mod_trezorcrypto_from_secret);
+
+/// def from_seed_slip23(seed: AnyBytes) -> HDNode:
+///     """
+///     Creates a Cardano HD node from a seed via SLIP-23 derivation.
+///     """
+static mp_obj_t mod_trezorcrypto_from_seed_slip23(mp_obj_t seed) {
+  mp_buffer_info_t bufinfo;
+  mp_get_buffer_raise(seed, &bufinfo, MP_BUFFER_READ);
+  if (bufinfo.len == 0) {
+    mp_raise_ValueError(MP_ERROR_TEXT("Invalid seed"));
+  }
+
+  uint8_t secret[CARDANO_SECRET_LENGTH] = {0};
+  HDNode hdnode = {0};
+  int res = 0;
+
+  res = secret_from_seed_cardano_slip23(bufinfo.buf, bufinfo.len, secret);
+  if (res != 1) {
+    mp_raise_msg(&mp_type_RuntimeError,
+                 MP_ERROR_TEXT("Unexpected failure in SLIP-23 derivation."));
+  }
+  res = hdnode_from_secret_cardano(secret, &hdnode);
+  if (res != 1) {
+    mp_raise_msg(
+        &mp_type_RuntimeError,
+        MP_ERROR_TEXT("Unexpected failure in constructing Cardano node."));
+  }
+
+  mp_obj_HDNode_t *o = mp_obj_malloc_with_finaliser(
+      mp_obj_HDNode_t, &mod_trezorcrypto_HDNode_type);
+  o->hdnode = hdnode;
+  o->fingerprint = hdnode_fingerprint(&o->hdnode);
+  return MP_OBJ_FROM_PTR(o);
+}
+
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_trezorcrypto_from_seed_slip23_obj,
+                                 mod_trezorcrypto_from_seed_slip23);
+
+/// def from_seed_ledger(seed: AnyBytes) -> HDNode:
+///     """
+///     Creates a Cardano HD node from a seed via Ledger derivation.
+///     """
+static mp_obj_t mod_trezorcrypto_from_seed_ledger(mp_obj_t seed) {
+  mp_buffer_info_t bufinfo;
+  mp_get_buffer_raise(seed, &bufinfo, MP_BUFFER_READ);
+  if (bufinfo.len == 0) {
+    mp_raise_ValueError(MP_ERROR_TEXT("Invalid seed"));
+  }
+
+  uint8_t secret[CARDANO_SECRET_LENGTH] = {0};
+  HDNode hdnode = {0};
+  int res = 0;
+
+  res = secret_from_seed_cardano_ledger(bufinfo.buf, bufinfo.len, secret);
+  if (res != 1) {
+    mp_raise_msg(&mp_type_RuntimeError,
+                 MP_ERROR_TEXT("Unexpected failure in Ledger derivation."));
+  }
+  res = hdnode_from_secret_cardano(secret, &hdnode);
+  if (res != 1) {
+    mp_raise_msg(
+        &mp_type_RuntimeError,
+        MP_ERROR_TEXT("Unexpected failure in constructing Cardano node."));
+  }
+
+  mp_obj_HDNode_t *o = mp_obj_malloc_with_finaliser(
+      mp_obj_HDNode_t, &mod_trezorcrypto_HDNode_type);
+  o->hdnode = hdnode;
+  o->fingerprint = hdnode_fingerprint(&o->hdnode);
+  return MP_OBJ_FROM_PTR(o);
+}
+
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_trezorcrypto_from_seed_ledger_obj,
+                                 mod_trezorcrypto_from_seed_ledger);
+
+static const mp_rom_map_elem_t mod_trezorcrypto_cardano_globals_table[] = {
+    {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_cardano)},
+    {MP_ROM_QSTR(MP_QSTR_derive_icarus),
+     MP_ROM_PTR(&mod_trezorcrypto_cardano_derive_icarus_obj)},
+    {MP_ROM_QSTR(MP_QSTR_from_secret),
+     MP_ROM_PTR(&mod_trezorcrypto_from_secret_obj)},
+    {MP_ROM_QSTR(MP_QSTR_from_seed_slip23),
+     MP_ROM_PTR(&mod_trezorcrypto_from_seed_slip23_obj)},
+    {MP_ROM_QSTR(MP_QSTR_from_seed_ledger),
+     MP_ROM_PTR(&mod_trezorcrypto_from_seed_ledger_obj)},
+};
+static MP_DEFINE_CONST_DICT(mod_trezorcrypto_cardano_globals,
+                            mod_trezorcrypto_cardano_globals_table);
+
+static const mp_obj_module_t mod_trezorcrypto_cardano_module = {
+    .base = {&mp_type_module},
+    .globals = (mp_obj_dict_t *)&mod_trezorcrypto_cardano_globals,
+};
+
+#endif  // !BITCOIN_ONLY

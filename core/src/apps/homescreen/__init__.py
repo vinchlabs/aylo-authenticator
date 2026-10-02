@@ -1,0 +1,108 @@
+from typing import TYPE_CHECKING
+
+import storage
+import storage.device
+import trezorui_api
+from trezor import config, utils, wire
+from trezor.enums import MessageType
+from trezor.ui.layouts.homescreen import run_busyscreen, run_homescreen, run_lockscreen
+from trezorui_api import NotificationLevel
+
+from apps.base import busy_expiry_ms
+from apps.common.authorization import is_set_any_session
+from apps.common.lock_manager import can_lock_device, lock_device
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
+
+async def busyscreen() -> None:
+    await run_busyscreen(busy_expiry_ms())
+
+
+async def homescreen() -> None:
+    from trezor import TR
+
+    if storage.device.is_initialized():
+        label = storage.device.get_label()
+    else:
+        label = None
+
+    # TODO: add notification that translations are out of date
+
+    notification = None
+    if is_set_any_session(MessageType.AuthorizeCoinJoin):
+        notification = (
+            TR.homescreen__title_coinjoin_authorized,
+            NotificationLevel.SUCCESS,
+            False,
+        )
+    elif storage.device.is_initialized() and storage.device.no_backup():
+        notification = (
+            TR.homescreen__title_seedless,
+            NotificationLevel.ALERT,
+            False,
+        )
+    elif storage.device.is_initialized() and storage.device.unfinished_backup():
+        notification = (
+            TR.homescreen__title_backup_failed,
+            NotificationLevel.ALERT,
+            True,
+        )
+    elif storage.device.is_initialized() and storage.device.needs_backup():
+        notification = (
+            TR.homescreen__title_backup_needed,
+            NotificationLevel.WARNING,
+            True,
+        )
+    elif storage.device.is_initialized() and not config.has_pin():
+        notification = (
+            TR.homescreen__title_pin_not_set,
+            NotificationLevel.WARNING,
+            True,
+        )
+    elif storage.device.get_experimental_features():
+        notification = (
+            TR.homescreen__title_experimental_mode,
+            NotificationLevel.INFO,
+            False,
+        )
+
+    res = await run_homescreen(
+        label=label, notification=notification, lockable=can_lock_device()
+    )
+
+    if utils.INTERNAL_MODEL == "T3W1":
+        if res is trezorui_api.INFO:
+            from .device_menu import handle_device_menu
+
+            return await handle_device_menu()
+    lock_device()
+
+
+async def _lockscreen(screensaver: bool = False) -> None:
+    from apps.common.lock_manager import unlock_device
+
+    # Only show the lockscreen UI if the device can in fact be locked, or if it is
+    # and OLED device (in which case the lockscreen is a screensaver).
+    if can_lock_device() or screensaver:
+        await run_lockscreen(
+            label=storage.device.get_label(),
+            coinjoin_authorized=is_set_any_session(MessageType.AuthorizeCoinJoin),
+        )
+
+    # Otherwise proceed directly to unlock() call. If the device is already unlocked,
+    # it should be a no-op storage-wise, but it resets the internal configuration
+    # to an unlocked state.
+    try:
+        await unlock_device()
+    except wire.PinCancelled:
+        pass
+
+
+def lockscreen() -> Coroutine[None, None, None]:
+    return _lockscreen()
+
+
+def screensaver() -> Coroutine[None, None, None]:
+    return _lockscreen(screensaver=True)

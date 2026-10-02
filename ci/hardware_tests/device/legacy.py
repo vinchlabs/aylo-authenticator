@@ -1,0 +1,65 @@
+from subprocess import Popen, run
+
+import serial
+
+from .device import Device
+
+
+class TrezorOne(Device):
+    def __init__(self, uhub_location, arduino_serial, device_port):
+        super().__init__(uhub_location=uhub_location, device_port=device_port)
+        self.serial = serial.Serial(arduino_serial, 9600)
+
+    def touch(self, location, action):
+        self.now()
+        self.log(f"[hardware/trezor] Touching the {location} button by {action}...")
+        self.serial.write(f"{location} {action}\n".encode())
+
+    def update_firmware(self, file=None):
+        if file:
+            run(f"headertool {file}", shell=True, check=True)  # check if file exists
+            unofficial = True
+            trezorctlcmd = f"trezorctl firmware-update -s -f {file}"
+            self.log(f"[software] Updating the firmware to {file}")
+        else:
+            unofficial = False
+            trezorctlcmd = "trezorctl firmware-update"
+            self.log("[software] Updating the firmware to latest")
+        self.wait(3)
+        self._enter_bootloader()
+
+        self.wait(3)
+        self.check_model("Trezor 1 bootloader")
+
+        self.log(f"[software/trezorctl] Running '{trezorctlcmd}' in background")
+        process = Popen(trezorctlcmd, shell=True)
+
+        self.wait(3)
+        self.touch("right", "click")
+        self.wait(30)
+        if unofficial:
+            self.touch("right", "click")
+        self.wait(10)
+        self.power_off()
+        self.power_on()
+        if unofficial:
+            self.touch("right", "click")
+            self.wait(5)
+            self.touch("right", "click")
+        self.wait(15)
+
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=1)
+        if process.returncode != 0:
+            raise RuntimeError(f"{trezorctlcmd} failed: {process.returncode}")
+
+        print(self.check_model("Trezor 1"))
+
+    def _enter_bootloader(self):
+        self.power_off()
+        self.touch("all", "press")
+        self.wait(2)
+        self.power_on()
+        self.wait(2)
+        self.touch("all", "unpress")

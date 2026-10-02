@@ -1,0 +1,220 @@
+use super::super::component::Button;
+use super::super::constant::SCREEN;
+use super::super::firmware::{Header, HeaderMsg};
+use super::super::theme;
+use crate::storage;
+use crate::translations::TR;
+use crate::trezorhal::display;
+use crate::ui::component::{Component, Event, EventCtx};
+use crate::ui::event::TouchEvent;
+use crate::ui::geometry::{Alignment2D, Insets, Offset, Point, Rect};
+use crate::ui::shape::{Bar, Renderer};
+
+pub struct SetBrightnessScreen {
+    header: Header,
+    slider: VerticalSlider,
+    brightness: u8,
+}
+
+impl SetBrightnessScreen {
+    const SLIDER_HEIGHT: i16 = 392;
+    pub fn new(min: u8, max: u8, init_value: u8) -> Self {
+        Self {
+            header: Header::new(TR::brightness__title.into()).with_right_button(
+                Button::with_icon(theme::ICON_CHECKMARK).styled(theme::button_header()),
+                HeaderMsg::Cancelled,
+            ),
+            slider: VerticalSlider::new(min, max, init_value),
+            brightness: init_value as _,
+        }
+    }
+}
+pub enum BrightnessScreenMsg {
+    Close,
+}
+
+impl Component for SetBrightnessScreen {
+    type Msg = BrightnessScreenMsg;
+
+    fn place(&mut self, bounds: Rect) -> Rect {
+        // assert full screen
+        debug_assert_eq!(bounds.height(), SCREEN.height());
+        debug_assert_eq!(bounds.width(), SCREEN.width());
+
+        let (header_area, rest) = bounds.split_top(Header::HEADER_HEIGHT);
+        let (slider_area, _) = rest.split_top(Self::SLIDER_HEIGHT);
+
+        self.header.place(header_area);
+        self.slider.place(slider_area);
+
+        bounds
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: Event) -> Option<Self::Msg> {
+        if let Some(HeaderMsg::Cancelled) = self.header.event(ctx, event) {
+            unwrap!(storage::set_brightness(self.brightness));
+            return Some(BrightnessScreenMsg::Close);
+        }
+
+        if let Some(brightness) = self.slider.event(ctx, event) {
+            self.brightness = brightness;
+        }
+        None
+    }
+
+    fn render<'s>(&'s self, target: &mut impl Renderer<'s>) {
+        self.header.render(target);
+        self.slider.render(target);
+    }
+}
+
+#[cfg(feature = "ui_debug")]
+impl crate::trace::Trace for SetBrightnessScreen {
+    fn trace(&self, t: &mut dyn crate::trace::Tracer) {
+        t.component("SetBrightnessScreen");
+        t.child("Header", &self.header);
+        t.child("Slider", &self.slider);
+    }
+}
+
+struct VerticalSlider {
+    area: Rect,
+    touch_area: Rect,
+    min: u8,
+    max: u8,
+    value: u8,
+    val_pct: u8,
+    touching: bool,
+}
+
+impl VerticalSlider {
+    const SLIDER_WIDTH: i16 = 120;
+
+    pub fn new(min: u8, max: u8, value: u8) -> Self {
+        debug_assert!(min < max);
+        let value = value.clamp(min, max);
+        Self {
+            area: Rect::zero(),
+            touch_area: Rect::zero(),
+            min,
+            max,
+            value,
+            val_pct: 0,
+            touching: false,
+        }
+    }
+
+    fn handle_touch(&mut self, pos: Point, ctx: &mut EventCtx) {
+        self.update_value(pos, ctx);
+        display::set_backlight(self.value);
+        ctx.request_paint();
+    }
+
+    fn update_value(&mut self, pos: Point, ctx: &mut EventCtx) {
+        // Area where slider value is not saturated
+        let proportional_area = self.area.inset(Insets::new(
+            Self::SLIDER_WIDTH / 2,
+            0,
+            Self::SLIDER_WIDTH / 2,
+            0,
+        ));
+
+        let filled = (proportional_area.y1 - pos.y).clamp(0, proportional_area.height());
+        let val_pct = (filled as u16 * 100) / proportional_area.height() as u16;
+        let val = ((val_pct * u16::from(self.max - self.min)) / 100) as u8 + self.min;
+
+        if val != self.value {
+            ctx.request_paint();
+            self.value = val;
+        }
+    }
+}
+
+impl Component for VerticalSlider {
+    type Msg = u8;
+
+    fn place(&mut self, bounds: Rect) -> Rect {
+        self.area = Rect::snap(
+            bounds.center(),
+            Offset::new(Self::SLIDER_WIDTH, bounds.height()),
+            Alignment2D::CENTER,
+        );
+        self.touch_area = self.area.outset(Insets::uniform(30));
+        bounds
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: Event) -> Option<Self::Msg> {
+        let touch_event = match event {
+            Event::Touch(te) => te,
+            _ => return None,
+        };
+
+        match touch_event {
+            TouchEvent::TouchStart(pos) if self.touch_area.contains(pos) => {
+                self.touching = true;
+                self.handle_touch(pos, ctx);
+            }
+            TouchEvent::TouchMove(pos) if self.touching => {
+                self.handle_touch(pos, ctx);
+            }
+            TouchEvent::TouchEnd(pos) if self.touching => {
+                self.touching = false;
+                self.handle_touch(pos, ctx);
+                return Some(self.value as _);
+            }
+            _ => {}
+        }
+
+        None
+    }
+
+    fn render<'s>(&'s self, target: &mut impl Renderer<'s>) {
+        let val_pct = ((100 * u16::from(self.value - self.min)) / u16::from(self.max - self.min))
+            .clamp(0, 100);
+
+        // Square area for the slider
+        let (_, small_area) = self.area.split_bottom(Self::SLIDER_WIDTH);
+
+        // Background pad
+        Bar::new(self.area)
+            .with_radius(12)
+            .with_bg(theme::GREY_EXTRA_DARK)
+            .render(target);
+
+        let slider_color = if self.touching {
+            theme::GREY
+        } else {
+            theme::GREY_LIGHT
+        };
+
+        // Moving slider
+        Bar::new(small_area.translate(
+            Offset::y(val_pct as i16 * (self.area.height() - Self::SLIDER_WIDTH) / 100).neg(),
+        ))
+        .with_radius(4)
+        .with_bg(slider_color)
+        .render(target);
+    }
+}
+
+#[cfg(feature = "ui_debug")]
+impl crate::trace::Trace for VerticalSlider {
+    fn trace(&self, t: &mut dyn crate::trace::Tracer) {
+        t.component("VerticalSlider");
+        t.int("value", i64::from(self.value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::constant::SCREEN;
+    use super::*;
+
+    #[test]
+    fn test_component_heights_fit_screen() {
+        assert!(
+            SetBrightnessScreen::SLIDER_HEIGHT + Header::HEADER_HEIGHT <= SCREEN.height(),
+            "Components overflow the screen height",
+        );
+    }
+}

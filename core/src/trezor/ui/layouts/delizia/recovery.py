@@ -1,0 +1,205 @@
+from typing import TYPE_CHECKING
+
+import trezorui_api
+from trezor import TR
+from trezor.enums import ButtonRequestType, RecoveryType
+
+from apps.common import backup_types
+
+from ..common import interact
+from . import raise_if_not_confirmed
+
+CONFIRMED = trezorui_api.CONFIRMED  # global_import_cache
+CANCELLED = trezorui_api.CANCELLED  # global_import_cache
+INFO = trezorui_api.INFO  # global_import_cache
+
+if TYPE_CHECKING:
+    from apps.management.recovery_device.layout import RemainingSharesInfo
+
+
+async def request_word_count(recovery_type: RecoveryType) -> int:
+    with trezorui_api.select_word_count(recovery_type=recovery_type) as layout:
+        count = await interact(
+            layout, "recovery_word_count", ButtonRequestType.MnemonicWordCount
+        )
+    assert isinstance(count, (int, str))
+    return int(count)
+
+
+async def request_word(
+    word_index: int,
+    word_count: int,
+    is_slip39: bool,
+    send_button_request: bool,
+    prefill_word: str = "",
+) -> str:
+    prompt = TR.recovery__word_x_of_y_template.format(word_index + 1, word_count)
+    can_go_back = word_index > 0
+
+    if is_slip39:
+        ctx = trezorui_api.request_slip39(
+            prompt=prompt, prefill_word=prefill_word, can_go_back=can_go_back
+        )
+    else:
+        ctx = trezorui_api.request_bip39(
+            prompt=prompt, prefill_word=prefill_word, can_go_back=can_go_back
+        )
+
+    with ctx as obj:
+        return await interact(
+            obj,
+            "mnemonic" if send_button_request else None,
+            ButtonRequestType.MnemonicInput,
+        )
+
+
+def format_remaining_shares_info(
+    remaining_shares_info: "RemainingSharesInfo",
+) -> list[tuple[str, str]]:
+    from trezor import strings
+    from trezor.crypto.slip39 import MAX_SHARE_COUNT
+
+    groups, shares_remaining, group_threshold = remaining_shares_info
+
+    pages: list[tuple[str, str]] = []
+    completed_groups = shares_remaining.count(0)
+
+    for group, remaining in zip(groups, shares_remaining):
+        if 0 < remaining < MAX_SHARE_COUNT:
+            title = strings.format_plural(
+                TR.recovery__x_more_items_starting_template_plural,
+                remaining,
+                TR.plurals__x_shares_needed,
+            )
+            words = "\n".join(group)
+            pages.append((title, words))
+        elif remaining == MAX_SHARE_COUNT and completed_groups < group_threshold:
+            groups_remaining = group_threshold - completed_groups
+            title = strings.format_plural(
+                TR.recovery__x_more_items_starting_template_plural,
+                groups_remaining,
+                TR.plurals__x_groups_needed,
+            )
+            words = "\n".join(group)
+            pages.append((title, words))
+
+    return pages
+
+
+async def show_group_share_success(share_index: int, group_index: int) -> None:
+    with trezorui_api.show_group_share_success(
+        lines=[
+            TR.recovery__you_have_entered,
+            TR.recovery__share_num_template.format(share_index + 1),
+            TR.words__from,
+            TR.recovery__group_num_template.format(group_index + 1),
+        ],
+    ) as layout:
+        await raise_if_not_confirmed(layout, "share_success", ButtonRequestType.Other)
+
+
+async def continue_recovery(
+    _button_label: str,  # unused on delizia
+    text: str,
+    subtext: str | None,
+    recovery_type: RecoveryType,
+    show_instructions: bool = False,
+    remaining_shares_info: "RemainingSharesInfo | None" = None,
+) -> bool:
+    with trezorui_api.continue_recovery_homepage(
+        text=text,
+        subtext=subtext,
+        button=None,
+        recovery_type=recovery_type,
+        show_instructions=show_instructions,
+        remaining_shares=(
+            format_remaining_shares_info(remaining_shares_info)
+            if remaining_shares_info
+            else None
+        ),
+    ) as layout:
+        result = await interact(
+            layout,
+            None,
+            ButtonRequestType.Other,
+            raise_on_cancel=None,
+        )
+        return result is CONFIRMED
+
+
+async def show_invalid_mnemonic(word_count: int) -> None:
+    if backup_types.is_slip39_word_count(word_count):
+        await show_recovery_warning(
+            "warning_invalid_share",
+            TR.words__please_try_again,
+            TR.recovery__invalid_share_entered,
+        )
+    else:
+        await show_recovery_warning(
+            "warning_invalid_seed",
+            TR.words__please_try_again,
+            TR.recovery__invalid_wallet_backup_entered,
+        )
+
+
+async def show_identifier_mismatch() -> None:
+    await show_recovery_warning(
+        "warning_mismatched_share",
+        "",
+        TR.recovery__share_from_another_multi_share_backup,
+    )
+
+
+async def show_already_added() -> None:
+    await show_recovery_warning(
+        "warning_known_share",
+        TR.recovery__share_already_entered,
+        TR.recovery__enter_different_share,
+    )
+
+
+async def show_group_threshold() -> None:
+    await show_recovery_warning(
+        "warning_group_threshold",
+        TR.recovery__group_threshold_reached,
+        TR.recovery__enter_share_from_diff_group,
+    )
+
+
+async def show_recovery_warning(
+    br_name: str,
+    content: str,
+    subheader: str | None = None,
+    button: str | None = None,
+    br_code: ButtonRequestType = ButtonRequestType.Warning,
+) -> None:
+    button = button or TR.buttons__try_again  # def_arg
+    with trezorui_api.show_warning(
+        title=content or TR.words__warning,
+        value=subheader or "",
+        button=button,
+        description="",
+        danger=True,
+    ) as layout:
+        await raise_if_not_confirmed(layout, br_name, br_code)
+
+
+async def show_dry_run_result(result: bool, is_slip39: bool) -> None:
+    from trezor.ui.layouts import show_success
+
+    if result:
+        if is_slip39:
+            text = TR.recovery__dry_run_slip39_valid_match
+        else:
+            text = TR.recovery__dry_run_bip39_valid_match
+        await show_success(
+            "success_dry_recovery", text, button=TR.instructions__tap_to_continue
+        )
+    else:
+        if is_slip39:
+            text = TR.recovery__dry_run_slip39_valid_mismatch
+        else:
+            text = TR.recovery__dry_run_bip39_valid_mismatch
+        await show_recovery_warning(
+            "warning_dry_recovery", "", text, button=TR.buttons__continue
+        )

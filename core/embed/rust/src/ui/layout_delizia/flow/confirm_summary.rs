@@ -1,0 +1,154 @@
+use heapless::Vec;
+
+use super::super::component::{
+    Frame, Header, PromptScreen, SwipeContent, VerticalMenu, VerticalMenuChoiceMsg,
+};
+use super::super::theme;
+use super::util::{dummy_page, ShowInfoParams};
+use crate::micropython::Error;
+use crate::strutil::TString;
+use crate::translations::TR;
+use crate::ui::component::swipe_detect::SwipeSettings;
+use crate::ui::component::ComponentExt;
+use crate::ui::flow::base::{Decision, DecisionBuilder as _};
+use crate::ui::flow::{FlowController, FlowMsg, SwipeFlow};
+use crate::ui::geometry::Direction;
+
+const MENU_ITEM_CANCEL: usize = 0;
+const MENU_ITEM_EXTRA_INFO: usize = 1;
+const MENU_ITEM_ACCOUNT_INFO: usize = 2;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum ConfirmSummary {
+    Summary,
+    Hold,
+    Menu,
+    ExtraInfo,
+    AccountInfo,
+    CancelTap,
+}
+
+impl FlowController for ConfirmSummary {
+    #[inline]
+    fn index(&'static self) -> usize {
+        *self as usize
+    }
+
+    fn handle_swipe(&'static self, direction: Direction) -> Decision {
+        match (self, direction) {
+            (Self::Summary, Direction::Down) => self.return_msg(FlowMsg::Back),
+            (Self::Summary, Direction::Up) => Self::Hold.swipe(direction),
+            (Self::Hold, Direction::Down) => Self::Summary.swipe(direction),
+            _ => self.do_nothing(),
+        }
+    }
+
+    fn handle_event(&'static self, msg: FlowMsg) -> Decision {
+        match (self, msg) {
+            (_, FlowMsg::Info) => Self::Menu.goto(),
+            (Self::Hold, FlowMsg::Confirmed) => self.return_msg(FlowMsg::Confirmed),
+            (Self::Menu, FlowMsg::Choice(MENU_ITEM_CANCEL)) => Self::CancelTap.swipe_left(),
+            (Self::Menu, FlowMsg::Choice(MENU_ITEM_EXTRA_INFO)) => Self::ExtraInfo.swipe_left(),
+            (Self::Menu, FlowMsg::Choice(MENU_ITEM_ACCOUNT_INFO)) => Self::AccountInfo.swipe_left(),
+            (Self::Menu, FlowMsg::Cancelled) => Self::Summary.swipe_right(),
+            (Self::CancelTap, FlowMsg::Confirmed) => self.return_msg(FlowMsg::Cancelled),
+            (_, FlowMsg::Cancelled) => Self::Menu.goto(),
+            _ => self.do_nothing(),
+        }
+    }
+}
+
+pub fn new_confirm_summary(
+    summary_params: ShowInfoParams,
+    account_params: Option<ShowInfoParams>,
+    account_title: Option<TString<'static>>,
+    extra_params: Option<ShowInfoParams>,
+    extra_title: Option<TString<'static>>,
+    verb_cancel: Option<TString<'static>>,
+    can_go_back: bool,
+) -> Result<SwipeFlow, Error> {
+    // Summary
+    let mut content_summary = summary_params.with_flow_menu(true);
+    if can_go_back {
+        content_summary = content_summary.with_swipe_down();
+    }
+    let content_summary = content_summary
+        .into_layout()?
+        // Summary(1) + Hold(1)
+        .with_pages(|summary_pages| summary_pages + 1);
+
+    // Hold to confirm
+    let content_hold = Frame::with_header(
+        Header::left_aligned(TR::send__sign_transaction.into()).with_menu_button(),
+        SwipeContent::new(PromptScreen::new_hold_to_confirm()),
+    )
+    .with_flow_menu()
+    .with_footer(TR::instructions__hold_to_sign.into(), None)
+    .with_swipe(Direction::Down, SwipeSettings::Default)
+    .map(super::util::map_to_confirm);
+
+    // ExtraInfo
+    let content_extra = extra_params
+        .map(|params| params.into_layout())
+        .transpose()?;
+    // AccountInfo
+    let content_account = account_params
+        .map(|params| params.into_layout())
+        .transpose()?;
+
+    // Menu with provided info and cancel
+    let mut menu = VerticalMenu::empty();
+    let mut menu_items = Vec::<usize, 3>::new();
+    if content_extra.is_some() {
+        menu = menu.item(
+            theme::ICON_CHEVRON_RIGHT,
+            extra_title.unwrap_or(TR::buttons__more_info.into()),
+        );
+        unwrap!(menu_items.push(MENU_ITEM_EXTRA_INFO));
+    }
+    if content_account.is_some() {
+        menu = menu.item(
+            theme::ICON_CHEVRON_RIGHT,
+            account_title.unwrap_or(TR::address_details__account_info.into()),
+        );
+        unwrap!(menu_items.push(MENU_ITEM_ACCOUNT_INFO));
+    }
+    menu = menu.cancel_item(verb_cancel.unwrap_or(TR::buttons__cancel_sign.into()));
+    unwrap!(menu_items.push(MENU_ITEM_CANCEL));
+    let content_menu = Frame::with_header(
+        Header::left_aligned(TString::empty()).with_cancel_button(),
+        menu,
+    )
+    .map(move |msg| match msg {
+        VerticalMenuChoiceMsg::Selected(i) => {
+            let selected_item = menu_items[i];
+            Some(FlowMsg::Choice(selected_item))
+        }
+    });
+
+    // CancelTap
+    let content_cancel_tap = Frame::with_header(
+        Header::left_aligned(TR::send__cancel_sign.into()).with_cancel_button(),
+        PromptScreen::new_tap_to_cancel(),
+    )
+    .with_footer(TR::instructions__tap_to_confirm.into(), None)
+    .map(super::util::map_to_confirm);
+
+    let mut res = SwipeFlow::new(&ConfirmSummary::Summary);
+    res.add_page(&ConfirmSummary::Summary, content_summary)?
+        .add_page(&ConfirmSummary::Hold, content_hold)?
+        .add_page(&ConfirmSummary::Menu, content_menu)?;
+    if let Some(content_extra) = content_extra {
+        res.add_page(&ConfirmSummary::ExtraInfo, content_extra)?;
+    } else {
+        res.add_page(&ConfirmSummary::ExtraInfo, dummy_page())?;
+    };
+    if let Some(content_account) = content_account {
+        res.add_page(&ConfirmSummary::AccountInfo, content_account)?;
+    } else {
+        res.add_page(&ConfirmSummary::AccountInfo, dummy_page())?;
+    };
+    res.add_page(&ConfirmSummary::CancelTap, content_cancel_tap)?;
+
+    Ok(res)
+}

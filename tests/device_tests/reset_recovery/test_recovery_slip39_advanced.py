@@ -1,0 +1,157 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import pytest
+
+from trezorlib import device, exceptions, messages
+from trezorlib.debuglink import DebugSession as Session
+
+from ...common import MNEMONIC_SLIP39_ADVANCED_20, MNEMONIC_SLIP39_ADVANCED_33
+from ...input_flows import (
+    InputFlowSlip39AdvancedRecovery,
+    InputFlowSlip39AdvancedRecoveryAbort,
+    InputFlowSlip39AdvancedRecoveryNoAbort,
+    InputFlowSlip39AdvancedRecoveryShareAlreadyEntered,
+    InputFlowSlip39AdvancedRecoveryThresholdReached,
+)
+
+pytestmark = [pytest.mark.models("core"), pytest.mark.setup_client(uninitialized=True)]
+
+EXTRA_GROUP_SHARE = [
+    "eraser senior decision smug corner ruin rescue cubic angel tackle skin skunk program roster trash rumor slush angel flea amazing"
+]
+
+# secrets generated using model T
+SECRET_20 = "c2d2e26ad06023c60145f150abe2dd2b"
+SECRET_33 = "c41d5cf80fed71a008a3a0ae0458ff0c6d621b1a5522bccbfedbcfad87005c06"
+
+VECTORS = (
+    pytest.param(MNEMONIC_SLIP39_ADVANCED_20, SECRET_20, id="20_words"),
+    pytest.param(MNEMONIC_SLIP39_ADVANCED_33, SECRET_33, id="33_words"),
+)
+
+
+# To allow reusing functionality for multiple tests
+def _test_secret(
+    session: Session, shares: list[str], secret: str, click_info: bool = False
+):
+    with session.test_ctx as client:
+        IF = InputFlowSlip39AdvancedRecovery(session, shares, click_info=click_info)
+        client.set_input_flow(IF.get())
+        device.recover(
+            session,
+            pin_protection=False,
+            passphrase_protection=False,
+            label="label",
+            backup_method=messages.BackupMethod.Display,
+        )
+
+    assert session.features.initialized is True
+    assert session.features.pin_protection is False
+    assert session.features.passphrase_protection is False
+    assert session.features.backup_type is messages.BackupType.Slip39_Advanced
+    assert session.debug.state().mnemonic_secret.hex() == secret
+
+
+@pytest.mark.parametrize("shares, secret", VECTORS)
+def test_secret(session: Session, shares: list[str], secret: str):
+    _test_secret(session, shares, secret)
+
+
+@pytest.mark.parametrize("shares, secret", VECTORS)
+@pytest.mark.models(skip="safe3", reason="safe3 does not have info button")
+def test_secret_click_info_button(session: Session, shares: list[str], secret: str):
+    _test_secret(session, shares, secret, click_info=True)
+
+
+def test_extra_share_entered(session: Session):
+    _test_secret(
+        session,
+        shares=EXTRA_GROUP_SHARE + MNEMONIC_SLIP39_ADVANCED_20,
+        secret=SECRET_20,
+    )
+
+
+def test_abort(session: Session):
+    with session.test_ctx as client:
+        IF = InputFlowSlip39AdvancedRecoveryAbort(session)
+        client.set_input_flow(IF.get())
+        with pytest.raises(exceptions.Cancelled):
+            device.recover(
+                session,
+                pin_protection=False,
+                label="label",
+                backup_method=messages.BackupMethod.Display,
+            )
+        session.refresh_features()
+        assert session.features.initialized is False
+
+
+def test_noabort(session: Session):
+    with session.test_ctx as client:
+        IF = InputFlowSlip39AdvancedRecoveryNoAbort(
+            session, EXTRA_GROUP_SHARE + MNEMONIC_SLIP39_ADVANCED_20
+        )
+        client.set_input_flow(IF.get())
+        device.recover(
+            session,
+            pin_protection=False,
+            label="label",
+            backup_method=messages.BackupMethod.Display,
+        )
+        session.refresh_features()
+        assert session.features.initialized is True
+
+
+def test_same_share(session: Session):
+    # we choose the second share from the fixture because
+    # the 1st is 1of1 and group threshold condition is reached first
+    first_share = MNEMONIC_SLIP39_ADVANCED_20[1].split(" ")
+    # second share is first 4 words of first
+    second_share = MNEMONIC_SLIP39_ADVANCED_20[1].split(" ")[:4]
+
+    with session.test_ctx as client:
+        IF = InputFlowSlip39AdvancedRecoveryShareAlreadyEntered(
+            session, first_share, second_share
+        )
+        client.set_input_flow(IF.get())
+        with pytest.raises(exceptions.Cancelled):
+            device.recover(
+                session,
+                pin_protection=False,
+                label="label",
+                backup_method=messages.BackupMethod.Display,
+            )
+
+
+def test_group_threshold_reached(session: Session):
+    # first share in the fixture is 1of1 so we choose that
+    first_share = MNEMONIC_SLIP39_ADVANCED_20[0].split(" ")
+    # second share is first 3 words of first
+    second_share = MNEMONIC_SLIP39_ADVANCED_20[0].split(" ")[:3]
+
+    with session.test_ctx as client:
+        IF = InputFlowSlip39AdvancedRecoveryThresholdReached(
+            session, first_share, second_share
+        )
+        client.set_input_flow(IF.get())
+        with pytest.raises(exceptions.Cancelled):
+            device.recover(
+                session,
+                pin_protection=False,
+                label="label",
+                backup_method=messages.BackupMethod.Display,
+            )

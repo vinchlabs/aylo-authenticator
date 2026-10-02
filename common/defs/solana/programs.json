@@ -1,0 +1,2675 @@
+{
+  "programs": [
+    {
+      "id": "11111111111111111111111111111111",
+      "name": "System Program",
+      "instruction_id_length": 4,
+      "instructions": [
+        {
+          "id": 0,
+          "name": "Create Account",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "lamports",
+              "type": "lamports",
+              "optional": false
+            },
+            {
+              "name": "space",
+              "type": "u64",
+              "optional": false
+            },
+            {
+              "name": "owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "funding_account",
+            "new_account"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "new_account",
+              "display_name": "Create account"
+            },
+            {
+              "parameter": "space",
+              "display_name": "Data size",
+              "default_value_to_hide": 0
+            },
+            {
+              "parameter": "owner",
+              "display_name": "Owner"
+            },
+            {
+              "parameter": "lamports",
+              "display_name": "Deposit"
+            },
+            {
+              "account": "funding_account",
+              "display_name": "From",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 1,
+          "name": "Assign",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "assigned_account"
+          ],
+          "references_required": 1,
+          "ui_properties": [
+            {
+              "account": "assigned_account",
+              "display_name": "Assign account",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "parameter": "owner",
+              "display_name": "Assign account to program",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Transfer",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "lamports",
+              "type": "lamports",
+              "optional": false
+            }
+          ],
+          "references": [
+            "funding_account",
+            "recipient_account"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "recipient_account",
+              "display_name": "Recipient"
+            },
+            {
+              "parameter": "lamports",
+              "display_name": "Amount"
+            },
+            {
+              "account": "funding_account",
+              "display_name": "Sender",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "name": "Create Account With Seed",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "base",
+              "type": "pubkey",
+              "optional": false
+            },
+            {
+              "name": "seed",
+              "type": "string",
+              "optional": false
+            },
+            {
+              "name": "lamports",
+              "type": "lamports",
+              "optional": false
+            },
+            {
+              "name": "space",
+              "type": "u64",
+              "optional": false
+            },
+            {
+              "name": "owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "funding_account",
+            "created_account",
+            "base_account"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "created_account",
+              "display_name": "Create account"
+            },
+            {
+              "parameter": "space",
+              "display_name": "Data size",
+              "default_value_to_hide": 0
+            },
+            {
+              "parameter": "owner",
+              "display_name": "Owner"
+            },
+            {
+              "parameter": "lamports",
+              "display_name": "Deposit"
+            },
+            {
+              "account": "funding_account",
+              "display_name": "From",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "name": "Advance Nonce Account",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "nonce_account",
+            "recent_blockhashes_sysvar",
+            "nonce_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "nonce_account",
+              "display_name": "Advance nonce"
+            },
+            {
+              "account": "nonce_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "name": "Withdraw Nonce Account",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "lamports",
+              "type": "lamports",
+              "optional": false
+            }
+          ],
+          "references": [
+            "nonce_account",
+            "recipient_account",
+            "recent_blockhashes_sysvar",
+            "rent_sysvar",
+            "nonce_authority"
+          ],
+          "references_required": 5,
+          "ui_properties": [
+            {
+              "parameter": "lamports",
+              "display_name": "Nonce withdraw"
+            },
+            {
+              "account": "nonce_account",
+              "display_name": "From"
+            },
+            {
+              "account": "recipient_account",
+              "display_name": "To"
+            },
+            {
+              "account": "nonce_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "name": "Initialize Nonce Account",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "nonce_authority",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "nonce_account",
+            "recent_blockhashes_sysvar",
+            "rent_sysvar"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "nonce_account",
+              "display_name": "Initialize nonce account"
+            },
+            {
+              "parameter": "nonce_authority",
+              "display_name": "New authority",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "name": "Authorize Nonce Account",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "nonce_authority",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "nonce_account",
+            "nonce_authority"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "nonce_account",
+              "display_name": "Set nonce authority"
+            },
+            {
+              "parameter": "nonce_authority",
+              "display_name": "New authority",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "account": "nonce_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "name": "Allocate",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "space",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [
+            "new_account"
+          ],
+          "references_required": 1,
+          "ui_properties": [
+            {
+              "account": "new_account",
+              "display_name": "Allocate account",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "parameter": "space",
+              "display_name": "Data size"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "name": "Allocate With Seed",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "base",
+              "type": "pubkey",
+              "optional": false
+            },
+            {
+              "name": "seed",
+              "type": "string",
+              "optional": false
+            },
+            {
+              "name": "space",
+              "type": "u64",
+              "optional": false
+            },
+            {
+              "name": "owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "allocated_account",
+            "base_account"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "allocated_account",
+              "display_name": "Allocate data for account"
+            },
+            {
+              "parameter": "space",
+              "display_name": "Data size"
+            },
+            {
+              "parameter": "owner",
+              "display_name": "Owner"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "name": "Assign With Seed",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "base",
+              "type": "pubkey",
+              "optional": false
+            },
+            {
+              "name": "seed",
+              "type": "string",
+              "optional": false
+            },
+            {
+              "name": "owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "assigned_account",
+            "base_account"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "assigned_account",
+              "display_name": "Assign account"
+            },
+            {
+              "parameter": "owner",
+              "display_name": "Assign account to program"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "name": "Transfer With Seed",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "lamports",
+              "type": "lamports",
+              "optional": false
+            },
+            {
+              "name": "from_seed",
+              "type": "string",
+              "optional": false
+            },
+            {
+              "name": "from_owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "funding_account",
+            "base_account",
+            "recipient_account"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "recipient_account",
+              "display_name": "Recipient"
+            },
+            {
+              "parameter": "lamports",
+              "display_name": "Amount"
+            },
+            {
+              "account": "funding_account",
+              "display_name": "Sender"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "name": "Upgrade Nonce Account",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "nonce_account"
+          ],
+          "references_required": 1,
+          "ui_properties": [
+            {
+              "account": "nonce_account",
+              "display_name": "Upgrade nonce account"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Stake11111111111111111111111111111111111111",
+      "name": "Stake Program",
+      "instruction_id_length": 4,
+      "instructions": [
+        {
+          "id": 0,
+          "name": "Initialize",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "staker",
+              "type": "pubkey",
+              "optional": false
+            },
+            {
+              "name": "withdrawer",
+              "type": "pubkey",
+              "optional": false
+            },
+            {
+              "name": "unix_timestamp",
+              "type": "unix_timestamp",
+              "optional": false
+            },
+            {
+              "name": "epoch",
+              "type": "u64",
+              "optional": false
+            },
+            {
+              "name": "custodian",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "uninitialized_stake_account",
+            "rent_sysvar"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "uninitialized_stake_account",
+              "display_name": "Initialize stake account"
+            },
+            {
+              "parameter": "staker",
+              "display_name": "New stake authority",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "parameter": "withdrawer",
+              "display_name": "New withdraw authority",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "parameter": "unix_timestamp",
+              "display_name": "Lockup time",
+              "default_value_to_hide": 0
+            },
+            {
+              "parameter": "epoch",
+              "display_name": "Lockup epoch",
+              "default_value_to_hide": 0
+            },
+            {
+              "parameter": "custodian",
+              "display_name": "Lockup authority",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 1,
+          "name": "Authorize",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "pubkey",
+              "type": "pubkey",
+              "optional": false
+            },
+            {
+              "name": "stake_authorize",
+              "type": "StakeAuthorize",
+              "optional": false
+            }
+          ],
+          "references": [
+            "stake_account",
+            "clock_sysvar",
+            "stake_or_withdraw_authority",
+            "lockup_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "stake_account",
+              "display_name": "Set authority for"
+            },
+            {
+              "parameter": "pubkey",
+              "display_name": "New authority"
+            },
+            {
+              "parameter": "stake_authorize",
+              "display_name": "Authority type"
+            },
+            {
+              "account": "stake_or_withdraw_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "account": "lockup_authority",
+              "display_name": "Custodian",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Delegate Stake",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "initialized_stake_account",
+            "vote_account",
+            "clock_sysvar",
+            "stake_history_sysvar",
+            "config_account",
+            "stake_authority"
+          ],
+          "references_required": 6,
+          "ui_properties": [
+            {
+              "account": "initialized_stake_account",
+              "display_name": "Delegate from"
+            },
+            {
+              "account": "stake_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "account": "vote_account",
+              "display_name": "Vote account"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "name": "Split",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "lamports",
+              "type": "lamports",
+              "optional": false
+            }
+          ],
+          "references": [
+            "stake_account",
+            "uninitialized_stake_account",
+            "stake_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "parameter": "lamports",
+              "display_name": "Split stake"
+            },
+            {
+              "account": "stake_account",
+              "display_name": "From"
+            },
+            {
+              "account": "uninitialized_stake_account",
+              "display_name": "To"
+            },
+            {
+              "account": "stake_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "name": "Withdraw",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "lamports",
+              "type": "lamports",
+              "optional": false
+            }
+          ],
+          "references": [
+            "stake_account",
+            "recipient_account",
+            "clock_sysvar",
+            "stake_history_sysvar",
+            "withdrawal_authority",
+            "lockup_authority"
+          ],
+          "references_required": 5,
+          "ui_properties": [
+            {
+              "parameter": "lamports",
+              "display_name": "Withdraw stake"
+            },
+            {
+              "account": "stake_account",
+              "display_name": "From"
+            },
+            {
+              "account": "recipient_account",
+              "display_name": "To"
+            },
+            {
+              "account": "withdrawal_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "name": "Deactivate",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "delegated_stake_account",
+            "clock_sysvar",
+            "stake_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "delegated_stake_account",
+              "display_name": "Deactivate stake account"
+            },
+            {
+              "account": "stake_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "name": "Set Lockup",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "unix_timestamp",
+              "type": "unix_timestamp",
+              "optional": true
+            },
+            {
+              "name": "epoch",
+              "type": "u64",
+              "optional": true
+            },
+            {
+              "name": "custodian",
+              "type": "pubkey",
+              "optional": true
+            }
+          ],
+          "references": [
+            "initialized_stake_account",
+            "lockup_or_withdraw_authority"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "initialized_stake_account",
+              "display_name": "Set lockup for account"
+            },
+            {
+              "parameter": "unix_timestamp",
+              "display_name": "Time",
+              "default_value_to_hide": 0
+            },
+            {
+              "parameter": "epoch",
+              "display_name": "Epoch",
+              "default_value_to_hide": 0
+            },
+            {
+              "parameter": "custodian",
+              "display_name": "New lockup authority"
+            },
+            {
+              "account": "lockup_or_withdraw_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "name": "Merge",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "destination_stake_account",
+            "source_stake_account",
+            "clock_sysvar",
+            "stake_history_sysvar",
+            "stake_authority"
+          ],
+          "references_required": 5,
+          "ui_properties": [
+            {
+              "account": "source_stake_account",
+              "display_name": "Merge stake account"
+            },
+            {
+              "account": "destination_stake_account",
+              "display_name": "Into"
+            },
+            {
+              "account": "stake_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "name": "Authorize With Seed",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "new_authorized_pubkey",
+              "type": "pubkey",
+              "optional": false
+            },
+            {
+              "name": "stake_authorize",
+              "type": "StakeAuthorize",
+              "optional": false
+            },
+            {
+              "name": "authority_seed",
+              "type": "string",
+              "optional": false
+            },
+            {
+              "name": "authority_owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "stake_account",
+            "stake_or_withdraw_authority",
+            "clock_sysvar",
+            "lockup_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "stake_account",
+              "display_name": "Set authority for"
+            },
+            {
+              "parameter": "new_authorized_pubkey",
+              "display_name": "New authority"
+            },
+            {
+              "parameter": "stake_authorize",
+              "display_name": "Authority type"
+            },
+            {
+              "account": "stake_or_withdraw_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "account": "lockup_authority",
+              "display_name": "Custodian",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "name": "Initialize Checked",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "uninitialized_stake_account",
+            "rent_sysvar",
+            "stake_authority",
+            "withdrawal_authority"
+          ],
+          "references_required": 4,
+          "ui_properties": [
+            {
+              "account": "uninitialized_stake_account",
+              "display_name": "Uninitialized stake account"
+            },
+            {
+              "account": "stake_authority",
+              "display_name": "New stake authority"
+            },
+            {
+              "account": "withdrawal_authority",
+              "display_name": "New withdraw authority",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "name": "Authorize Checked",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "stake_authorize",
+              "type": "StakeAuthorize",
+              "optional": false
+            }
+          ],
+          "references": [
+            "stake_account",
+            "clock_sysvar",
+            "stake_or_withdraw_authority",
+            "new_stake_or_withdraw_authority",
+            "lockup_authority"
+          ],
+          "references_required": 4,
+          "ui_properties": [
+            {
+              "account": "stake_account",
+              "display_name": "Set authority for"
+            },
+            {
+              "account": "new_stake_or_withdraw_authority",
+              "display_name": "New authority",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "parameter": "stake_authorize",
+              "display_name": "Authority type"
+            },
+            {
+              "account": "stake_or_withdraw_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "account": "lockup_authority",
+              "display_name": "Custodian",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "name": "Authorize Checked With Seed",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "stake_authorize",
+              "type": "StakeAuthorize",
+              "optional": false
+            },
+            {
+              "name": "authority_seed",
+              "type": "string",
+              "optional": false
+            },
+            {
+              "name": "authority_owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "stake_account",
+            "stake_or_withdraw_authority",
+            "clock_sysvar",
+            "new_stake_or_withdraw_authority",
+            "lockup_authority"
+          ],
+          "references_required": 4,
+          "ui_properties": [
+            {
+              "account": "stake_account",
+              "display_name": "Set authority for"
+            },
+            {
+              "account": "new_stake_or_withdraw_authority",
+              "display_name": "New authority",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "parameter": "stake_authorize",
+              "display_name": "Authority type"
+            },
+            {
+              "account": "stake_or_withdraw_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "account": "lockup_authority",
+              "display_name": "Custodian",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "name": "Set Lockup Checked",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "unix_timestamp",
+              "type": "unix_timestamp",
+              "optional": true
+            },
+            {
+              "name": "epoch",
+              "type": "u64",
+              "optional": true
+            }
+          ],
+          "references": [
+            "stake_account",
+            "lockup_or_withdraw_authority",
+            "new_lockup_authority"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "stake_account",
+              "display_name": "Set lockup for stake account"
+            },
+            {
+              "parameter": "unix_timestamp",
+              "display_name": "Time",
+              "default_value_to_hide": 0
+            },
+            {
+              "parameter": "epoch",
+              "display_name": "Epoch",
+              "default_value_to_hide": 0
+            },
+            {
+              "account": "new_lockup_authority",
+              "display_name": "New lockup authority",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "account": "lockup_or_withdraw_authority",
+              "display_name": "Authorized by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ComputeBudget111111111111111111111111111111",
+      "name": "Compute Budget Program",
+      "instruction_id_length": 1,
+      "instructions": [
+        {
+          "id": 1,
+          "name": "Request Heap Frame",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "bytes",
+              "type": "u32",
+              "optional": false
+            }
+          ],
+          "references": [],
+          "references_required": 0,
+          "ui_properties": [
+            {
+              "parameter": "bytes",
+              "display_name": "Bytes"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Set Compute Unit Limit",
+          "is_ui_hidden": true,
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "units",
+              "type": "u32",
+              "optional": false
+            }
+          ],
+          "references": ["program_ref"],
+          "references_required": 0,
+          "ui_properties": [
+            {
+              "parameter": "units",
+              "display_name": "Units"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "name": "Set Compute Unit Price",
+          "is_ui_hidden": true,
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "lamports",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [],
+          "references_required": 0,
+          "ui_properties": [
+            {
+              "parameter": "lamports",
+              "display_name": "Compute unit price"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "name": "Token Program",
+      "instruction_id_length": 1,
+      "instructions": [
+        {
+          "id": 1,
+          "name": "Initialize Account",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "account_to_initialize",
+            "mint_account",
+            "owner",
+            "rent_sysvar"
+          ],
+          "references_required": 4,
+          "ui_properties": [
+            {
+              "account": "account_to_initialize",
+              "display_name": "Initialize account"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner"
+            },
+            {
+              "account": "mint_account",
+              "display_name": "For token"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Initialize Multisig",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "number_of_signers",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "multisig_account",
+            "rent_sysvar",
+            "signer_accounts"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "multisig_account",
+              "display_name": "Initialize multisig"
+            },
+            {
+              "parameter": "number_of_signers",
+              "display_name": "Threshold"
+            },
+            {
+              "account": "signer_accounts",
+              "display_name": "Signers"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "name": "Transfer",
+          "is_multisig": true,
+          "is_deprecated_warning": "Warning: Instruction is deprecated. Token decimals unknown.",
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [
+            "source_account",
+            "destination_account",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "destination_account",
+              "display_name": "Recipient"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Amount"
+            },
+            {
+              "account": "source_account",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "name": "Approve",
+          "is_multisig": true,
+          "is_deprecated_warning": "Warning: Instruction is deprecated. Token decimals unknown.",
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [
+            "source_account",
+            "delegate_account",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "delegate_account",
+              "display_name": "Approve delegate"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Allowance"
+            },
+            {
+              "account": "source_account",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "name": "Revoke",
+          "is_multisig": true,
+          "parameters": [],
+          "references": [
+            "source_account",
+            "owner"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "source_account",
+              "display_name": "Revoke delegate"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "name": "Set Authority",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "authority_type",
+              "type": "AuthorityType",
+              "optional": false
+            },
+            {
+              "name": "new_authority",
+              "type": "pubkey",
+              "optional": true
+            }
+          ],
+          "references": [
+            "mint_account",
+            "current_authority"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "mint_account",
+              "display_name": "Set authority for"
+            },
+            {
+              "parameter": "new_authority",
+              "display_name": "New authority",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "parameter": "authority_type",
+              "display_name": "Authority type"
+            },
+            {
+              "account": "current_authority",
+              "display_name": "Current authority",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "name": "Mint To",
+          "is_multisig": true,
+          "is_deprecated_warning": "Warning: Instruction is deprecated. Token decimals unknown.",
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [
+            "mint",
+            "account_to_mint",
+            "minting_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "mint",
+              "display_name": "Mint token"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Mint amount"
+            },
+            {
+              "account": "account_to_mint",
+              "display_name": "To"
+            },
+            {
+              "account": "minting_authority",
+              "display_name": "Mint authority",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "name": "Burn",
+          "is_multisig": true,
+          "is_deprecated_warning": "Warning: Instruction is deprecated. Token decimals unknown.",
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [
+            "account_to_burn_from",
+            "token_mint",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "token_mint",
+              "display_name": "Burn token"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Burn amount"
+            },
+            {
+              "account": "account_to_burn_from",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Mint authority",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "name": "Close Account",
+          "is_multisig": true,
+          "parameters": [],
+          "references": [
+            "account_to_close",
+            "destination_account",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "account_to_close",
+              "display_name": "Close account"
+            },
+            {
+              "account": "destination_account",
+              "display_name": "Withdraw to"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "name": "Freeze Account",
+          "is_multisig": true,
+          "parameters": [],
+          "references": [
+            "account_to_freeze",
+            "token_mint",
+            "freeze_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "account_to_freeze",
+              "display_name": "Freeze account"
+            },
+            {
+              "account": "token_mint",
+              "display_name": "Token"
+            },
+            {
+              "account": "freeze_authority",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "name": "Thaw Account",
+          "is_multisig": true,
+          "parameters": [],
+          "references": [
+            "account_to_freeze",
+            "token_mint",
+            "freeze_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "account_to_freeze",
+              "display_name": "Thaw account"
+            },
+            {
+              "account": "token_mint",
+              "display_name": "Token"
+            },
+            {
+              "account": "freeze_authority",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "name": "Transfer Checked",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "token_amount",
+              "optional": false,
+              "args": {
+                "decimals": "decimals",
+                "mint": "token_mint"
+              }
+            },
+            {
+              "name": "decimals",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "source_account",
+            "token_mint",
+            "destination_account",
+            "owner"
+          ],
+          "references_required": 4,
+          "ui_properties": [
+            {
+              "account": "token_mint",
+              "display_name": "Token"
+            },
+            {
+              "account": "destination_account",
+              "display_name": "Recipient"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Amount"
+            },
+            {
+              "account": "source_account",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "name": "Approve Checked",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "token_amount",
+              "optional": false,
+              "args": {
+                "decimals": "decimals",
+                "mint": "token_mint"
+              }
+            },
+            {
+              "name": "decimals",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "source_account",
+            "token_mint",
+            "delegate",
+            "owner"
+          ],
+          "references_required": 4,
+          "ui_properties": [
+            {
+              "account": "token_mint",
+              "display_name": "Approve token"
+            },
+            {
+              "account": "delegate",
+              "display_name": "Approve delegate"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Allowance"
+            },
+            {
+              "account": "source_account",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "name": "Mint to Checked",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "token_amount",
+              "optional": false,
+              "args": {
+                "decimals": "decimals",
+                "mint": "mint"
+              }
+            },
+            {
+              "name": "decimals",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "mint",
+            "account_to_mint",
+            "minting_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "mint",
+              "display_name": "Mint token"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Mint amount"
+            },
+            {
+              "account": "account_to_mint",
+              "display_name": "To"
+            },
+            {
+              "account": "minting_authority",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "name": "Burn Checked",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "token_amount",
+              "optional": false,
+              "args": {
+                "decimals": "decimals",
+                "mint": "token_mint"
+              }
+            },
+            {
+              "name": "decimals",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "account_to_burn_from",
+            "token_mint",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "token_mint",
+              "display_name": "Burn token"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Burn amount"
+            },
+            {
+              "account": "account_to_burn_from",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "name": "Initialize Account 2",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "account_to_initialize",
+            "mint_account",
+            "rent_sysvar"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "account_to_initialize",
+              "display_name": "Initialize account"
+            },
+            {
+              "parameter": "owner",
+              "display_name": "Owner"
+            },
+            {
+              "account": "mint_account",
+              "display_name": "For token"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "name": "Sync Native",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "token_account"
+          ],
+          "references_required": 1,
+          "ui_properties": [
+            {
+              "account": "token_account",
+              "display_name": "Sync native account"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "name": "Initialize Account 3",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "account_to_initialize",
+            "mint_account"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "account_to_initialize",
+              "display_name": "Initialize account"
+            },
+            {
+              "parameter": "owner",
+              "display_name": "Owner"
+            },
+            {
+              "account": "mint_account",
+              "display_name": "For token"
+            }
+          ]
+        },
+        {
+          "id": 22,
+          "name": "Initialize Immutable Owner",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "account_to_initialize"
+          ],
+          "references_required": 1,
+          "ui_properties": [
+            {
+              "account": "account_to_initialize",
+              "display_name": "Init account"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+      "name": "Token 2022 Program",
+      "instruction_id_length": 1,
+      "instructions": [
+        {
+          "id": 1,
+          "name": "Initialize Account",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "account_to_initialize",
+            "mint_account",
+            "owner",
+            "rent_sysvar"
+          ],
+          "references_required": 4,
+          "ui_properties": [
+            {
+              "account": "account_to_initialize",
+              "display_name": "Initialize account"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner"
+            },
+            {
+              "account": "mint_account",
+              "display_name": "For token"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Initialize Multisig",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "number_of_signers",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "multisig_account",
+            "rent_sysvar",
+            "signer_accounts"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "multisig_account",
+              "display_name": "Init multisig"
+            },
+            {
+              "parameter": "number_of_signers",
+              "display_name": "Threshold"
+            },
+            {
+              "account": "signer_accounts",
+              "display_name": "Signers"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "name": "Transfer",
+          "is_multisig": true,
+          "is_deprecated_warning": "Warning: Instruction is deprecated. Token decimals unknown.",
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [
+            "source_account",
+            "destination_account",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "destination_account",
+              "display_name": "Recipient"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Amount"
+            },
+            {
+              "account": "source_account",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "name": "Approve",
+          "is_multisig": true,
+          "is_deprecated_warning": "Warning: Instruction is deprecated. Token decimals unknown.",
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [
+            "source_account",
+            "delegate_account",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "delegate_account",
+              "display_name": "Approve delegate"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Allowance"
+            },
+            {
+              "account": "source_account",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "name": "Revoke",
+          "is_multisig": true,
+          "parameters": [],
+          "references": [
+            "source_account",
+            "owner"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "source_account",
+              "display_name": "Rewoke delegate"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "name": "Set Authority",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "authority_type",
+              "type": "AuthorityType",
+              "optional": false
+            },
+            {
+              "name": "new_authority",
+              "type": "pubkey",
+              "optional": true
+            }
+          ],
+          "references": [
+            "mint_account",
+            "current_authority"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "mint_account",
+              "display_name": "Set authority for"
+            },
+            {
+              "parameter": "new_authority",
+              "display_name": "New authority",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "parameter": "authority_type",
+              "display_name": "Authority type"
+            },
+            {
+              "account": "current_authority",
+              "display_name": "Current authority",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "name": "Mint to",
+          "is_multisig": true,
+          "is_deprecated_warning": "Warning: Instruction is deprecated. Token decimals unknown.",
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [
+            "mint",
+            "account_to_mint",
+            "minting_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "mint",
+              "display_name": "Mint token"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Mint amount"
+            },
+            {
+              "account": "account_to_mint",
+              "display_name": "To"
+            },
+            {
+              "account": "minting_authority",
+              "display_name": "Mint authority",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "name": "Burn",
+          "is_multisig": true,
+          "is_deprecated_warning": "Warning: Instruction is deprecated. Token decimals unknown.",
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "u64",
+              "optional": false
+            }
+          ],
+          "references": [
+            "account_to_burn_from",
+            "token_mint",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "token_mint",
+              "display_name": "Burn token"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Burn amount"
+            },
+            {
+              "account": "account_to_burn_from",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Mint authority",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "name": "Close Account",
+          "is_multisig": true,
+          "parameters": [],
+          "references": [
+            "account_to_close",
+            "destination_account",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "account_to_close",
+              "display_name": "Close account"
+            },
+            {
+              "account": "destination_account",
+              "display_name": "Withdraw to"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "name": "Freeze Account",
+          "is_multisig": true,
+          "parameters": [],
+          "references": [
+            "account_to_freeze",
+            "token_mint",
+            "freeze_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "account_to_freeze",
+              "display_name": "Freeze account"
+            },
+            {
+              "account": "token_mint",
+              "display_name": "Token"
+            },
+            {
+              "account": "freeze_authority",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "name": "Thaw Account",
+          "is_multisig": true,
+          "parameters": [],
+          "references": [
+            "account_to_freeze",
+            "token_mint",
+            "freeze_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "account_to_freeze",
+              "display_name": "Thaw account"
+            },
+            {
+              "account": "token_mint",
+              "display_name": "Token"
+            },
+            {
+              "account": "freeze_authority",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "name": "Transfer Checked",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "token_amount",
+              "optional": false,
+              "args": {
+                "decimals": "decimals",
+                "mint": "token_mint"
+              }
+            },
+            {
+              "name": "decimals",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "source_account",
+            "token_mint",
+            "destination_account",
+            "owner"
+          ],
+          "references_required": 4,
+          "ui_properties": [
+            {
+              "account": "token_mint",
+              "display_name": "Token"
+            },
+            {
+              "account": "destination_account",
+              "display_name": "Recipient"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Amount"
+            },
+            {
+              "account": "source_account",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "name": "Approve Checked",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "token_amount",
+              "optional": false,
+              "args": {
+                "decimals": "decimals",
+                "mint": "token_mint"
+              }
+            },
+            {
+              "name": "decimals",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "source_account",
+            "token_mint",
+            "delegate",
+            "owner"
+          ],
+          "references_required": 4,
+          "ui_properties": [
+            {
+              "account": "token_mint",
+              "display_name": "Approve token"
+            },
+            {
+              "account": "delegate",
+              "display_name": "Approve delegate"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Allowance"
+            },
+            {
+              "account": "source_account",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "name": "Mint to Checked",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "token_amount",
+              "optional": false,
+              "args": {
+                "decimals": "decimals",
+                "mint": "mint"
+              }
+            },
+            {
+              "name": "decimals",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "mint",
+            "account_to_mint",
+            "minting_authority"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "mint",
+              "display_name": "Mint token"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Mint amount"
+            },
+            {
+              "account": "account_to_mint",
+              "display_name": "To"
+            },
+            {
+              "account": "minting_authority",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "name": "Burn Checked",
+          "is_multisig": true,
+          "parameters": [
+            {
+              "name": "amount",
+              "type": "token_amount",
+              "optional": false,
+              "args": {
+                "decimals": "decimals",
+                "mint": "token_mint"
+              }
+            },
+            {
+              "name": "decimals",
+              "type": "u8",
+              "optional": false
+            }
+          ],
+          "references": [
+            "account_to_burn_from",
+            "token_mint",
+            "owner"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "token_mint",
+              "display_name": "Burn token"
+            },
+            {
+              "parameter": "amount",
+              "display_name": "Burn amount"
+            },
+            {
+              "account": "account_to_burn_from",
+              "display_name": "From"
+            },
+            {
+              "account": "owner",
+              "display_name": "Owner",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "name": "Initialize Account 2",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "account_to_initialize",
+            "mint_account",
+            "rent_sysvar"
+          ],
+          "references_required": 3,
+          "ui_properties": [
+            {
+              "account": "account_to_initialize",
+              "display_name": "Initialize account"
+            },
+            {
+              "parameter": "owner",
+              "display_name": "Owner"
+            },
+            {
+              "account": "mint_account",
+              "display_name": "For token"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "name": "Sync Native",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "token_account"
+          ],
+          "references_required": 1,
+          "ui_properties": [
+            {
+              "account": "token_account",
+              "display_name": "Sync native account"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "name": "Initialize Account 3",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "owner",
+              "type": "pubkey",
+              "optional": false
+            }
+          ],
+          "references": [
+            "account_to_initialize",
+            "mint_account"
+          ],
+          "references_required": 2,
+          "ui_properties": [
+            {
+              "account": "account_to_initialize",
+              "display_name": "Initialize account"
+            },
+            {
+              "parameter": "owner",
+              "display_name": "Owner"
+            },
+            {
+              "account": "mint_account",
+              "display_name": "For token"
+            }
+          ]
+        },
+        {
+          "id": 22,
+          "name": "Initialize Immutable Owner",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "account_to_initialize"
+          ],
+          "references_required": 1,
+          "ui_properties": [
+            {
+              "account": "account_to_initialize",
+              "display_name": "Initialize immutable owner extension for account"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+      "name": "Associated Token Account Program",
+      "instruction_id_length": 1,
+      "instructions": [
+        {
+          "id": null,
+          "name": "Create",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "funding_account",
+            "associated_token_account",
+            "wallet_address",
+            "token_mint",
+            "system_program",
+            "spl_token",
+            "rent_sysvar"
+          ],
+          "references_required": 6,
+          "ui_properties": [
+            {
+              "account": "associated_token_account",
+              "display_name": "Create token account"
+            },
+            {
+              "account": "token_mint",
+              "display_name": "For token"
+            },
+            {
+              "account": "wallet_address",
+              "display_name": "Owned by"
+            },
+            {
+              "account": "funding_account",
+              "display_name": "Funded by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 1,
+          "name": "Create Idempotent",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "funding_account",
+            "associated_token_account",
+            "wallet_addr",
+            "token_mint",
+            "system_program",
+            "spl_token"
+          ],
+          "references_required": 6,
+          "ui_properties": [
+            {
+              "account": "associated_token_account",
+              "display_name": "Create token account"
+            },
+            {
+              "account": "token_mint",
+              "display_name": "For token"
+            },
+            {
+              "account": "wallet_addr",
+              "display_name": "Owned by"
+            },
+            {
+              "account": "funding_account",
+              "display_name": "Funded by",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Recover Nested",
+          "is_multisig": false,
+          "parameters": [],
+          "references": [
+            "nested_account",
+            "token_mint_nested",
+            "associated_token_account",
+            "owner",
+            "token_mint_owner",
+            "wallet_address",
+            "spl_token"
+          ],
+          "references_required": 7,
+          "ui_properties": [
+            {
+              "account": "nested_account",
+              "display_name": "Recover nested token account",
+              "default_value_to_hide": "signer"
+            },
+            {
+              "account": "associated_token_account",
+              "display_name": "Transfer recovered tokens to"
+            },
+            {
+              "account": "wallet_address",
+              "display_name": "Transfer recovered SOL to",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+      "name": "Memo Program",
+      "instruction_id_length": 0,
+      "instructions": [
+        {
+          "id": null,
+          "name": "Memo",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "memo",
+              "type": "memo",
+              "optional": false
+            }
+          ],
+          "references": [
+            "signer_accounts"
+          ],
+          "references_required": 0,
+          "ui_properties": [
+            {
+              "parameter": "memo",
+              "display_name": "Memo"
+            },
+            {
+              "account": "signer_accounts",
+              "display_name": "Signer accounts",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo",
+      "name": "Memo Legacy Program",
+      "instruction_id_length": 0,
+      "instructions": [
+        {
+          "id": null,
+          "name": "Memo",
+          "is_multisig": false,
+          "parameters": [
+            {
+              "name": "memo",
+              "type": "memo",
+              "optional": false
+            }
+          ],
+          "references": [
+            "signer_accounts"
+          ],
+          "references_required": 0,
+          "ui_properties": [
+            {
+              "parameter": "memo",
+              "display_name": "Memo"
+            },
+            {
+              "account": "signer_accounts",
+              "display_name": "Signer accounts",
+              "default_value_to_hide": "signer"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "types": {
+    "u8": {
+      "parse": "parse_byte",
+      "format": "format_int"
+    },
+    "u32": {
+      "parse": "read_uint32_le",
+      "format": "format_int"
+    },
+    "u64": {
+      "parse": "read_uint64_le",
+      "format": "format_int"
+    },
+    "unix_timestamp": {
+      "parse": "read_uint64_le",
+      "format": "format_unix_timestamp"
+    },
+    "lamports": {
+      "parse": "read_uint64_le",
+      "format": "format_lamports"
+    },
+    "token_amount": {
+      "parse": "read_uint64_le",
+      "format": "format_token_amount",
+      "required_parameters": [
+        "#definitions",
+        "decimals",
+        "mint"
+      ]
+    },
+    "pubkey": {
+      "parse": "parse_pubkey",
+      "format": "format_pubkey"
+    },
+    "string": {
+      "parse": "parse_string",
+      "format": "format_identity"
+    },
+    "memo": {
+      "parse": "parse_memo",
+      "format": "format_identity"
+    },
+    "StakeAuthorize": {
+      "is_enum": true,
+      "parse": "read_uint32_le",
+      "format": "format_StakeAuthorize",
+      "fields": [
+        {
+          "name": "Stake",
+          "value": 0
+        },
+        {
+          "name": "Withdraw",
+          "value": 1
+        }
+      ]
+    },
+    "AuthorityType": {
+      "is_enum": true,
+      "parse": "parse_byte",
+      "format": "format_AuthorityType",
+      "fields": [
+        {
+          "name": "Mint tokens",
+          "value": 0
+        },
+        {
+          "name": "Freeze account",
+          "value": 1
+        },
+        {
+          "name": "Account owner",
+          "value": 2
+        },
+        {
+          "name": "Close account",
+          "value": 3
+        }
+      ]
+    }
+  }
+}

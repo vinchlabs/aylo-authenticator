@@ -1,0 +1,251 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+## 2.1.17 [21st May 2026]
+
+### Added
+- [T3W1] Add the MCU device certificate to startup_args.  [#6807]
+
+## 2.1.16 [18th March 2026]
+
+### Added
+- Added version build number to Features message.  [#6225]
+- [T3W1] Introduced Secure Monitor downgrade protection.  [#6244]
+- Adjusted version strings to show build version number.  [#6245]
+
+### Fixed
+- [T3W1] Fixed text position on waiting for host screen in bootloader when no menu is shown.  [#6307]
+
+## 2.1.15 [19th November 2025]
+
+### Fixed
+- [T3W1] Erase BLE bonds too after entering wipe code.  [#5939]
+- [T3W1] Respect BLE on/off settings in bootloader.  [#5952]
+- [T3W1] Fixed battery drain when waiting for unofficial firmware confirmation.  [#5993]
+- [T3W1] Adjust random part of BLE device name during pairing.  [#6019]
+- [T3W1] Restart bluetooth on reboot from device menu.  [#6023]
+
+## 2.1.14 [21st October 2025]
+
+### Changed
+- Minor UX improvements.
+
+## 2.1.13 [(internal release)]
+
+### Added
+- Signal FW corrupted to host via features message.  [#5857]
+
+## 2.1.12 [(internal release)]
+
+### Changed
+- Minor bug fixes.
+
+## 2.1.11 [(internal release)]
+
+### Added
+- Add cancel button to Connect to host screen.  [#4833]
+
+### Changed
+- Major code clean-up and refactoring.  [#4572]
+- Always allow reboot from bootloader menu.  [#5155]
+- Erase storage when bootloader is unlocked.  [#5345]
+
+### Fixed
+- Allow running firmware on locked bootloader device based on allow_run_with_secret flag.  [#4649]
+- [T2B1,T3B1] Fix screen title when confirming installation.  [#5057]
+- Fixed progress bar delay when installing firmware.  [#5484]
+
+## 2.1.10 [19th February 2025]
+
+### Fixed
+- [T3T1] Fix slow fade in/non responsiveness in bootloader UI.  [#4492]
+
+## 2.1.9 [September 2024]
+
+### Changed
+
+- [T3T1] Ignore touch errors while in manufacturing.  [#4195]
+
+## 2.1.8 [September 2024]
+
+### Added
+- Added firmware downgrade protection.  [#4133]
+
+### Changed
+- Require confirmation when installing non-full trust firmware image on empty device.  [#3709]
+- Fix incorrect error message when installing firmware for different model.  [#4081]
+- [T3B1, T3T1] Added bootloader unlock mechanism to U5 models.  [#4133]
+
+### Fixed
+- [T3B1] UI adjustments: fix icon on warning screen, replace empty logo with full during boot.  [#4140]
+
+## 2.1.7 [July 2024]
+
+### Added
+- [T3B1] Added support for T3B1.
+
+
+## 2.1.6 [May 2024]
+
+### Added
+- Added `unit_packaging` field to `Features`.  [#3711]
+
+### Changed
+- [T3T1] Changed USB manufacturer string to "Trezor Company" and product string to "Trezor Safe 5" in the USB descriptor strings.  [#3770]
+
+
+## 2.1.5 [April 2024]
+
+### Added
+- Added support for T3T1
+- Added basic support for STM32U5  [#3370]
+
+### Changed
+- Speed-up device boot  [#3429]
+
+
+## 2.1.4 [November 2023]
+
+### Added
+- Minimize risk of losing seed when upgrading firmware.  [#2794]
+- Support interaction-less upgrade.  [#2919]
+
+
+## 2.1.3 [September 2023]
+
+### Changed
+- Split builds of different parts to use simple util.s assembler, while FW+bootloader use interconnected ones.  [#3205]
+- No longer erases seed when firmware is corrupted but firmware header is correct and signed. Added firmware corrupted info to bootloader screen.  [#3122]
+- Correctly reinitialize Optiga SE when rebooting.  [#3303]
+
+
+## 2.1.2 [August 2023]
+
+Internal only release for Model R prototypes.
+
+### Added
+- Added support for STM32F429I-DISC1 board  [#2989]
+- Locked bootloader support: bootloader will disallow installation of unofficial firmware unless the Optiga pairing secret is erased.
+- Support unlocking the bootloader via `UnlockBootloader` message.
+
+### Changed
+- Show "empty lock" logo together with model name (replacing the "filled lock" logo for bootloader entirely).  [#3222]
+- When building a `PRODUCTION=0` bootloader, it will recognize the development signing keys instead of production ones.
+
+### Fixed
+- Fixed gamma correction settings for Model T  [#2955]
+
+
+## 2.1.1 [June 2023]
+
+Internal only release for Model R prototypes.
+
+### Added
+- Added production public keys for T2B1.  [#3048]
+- Added UI for T2B1.
+
+### Fixed
+- Fix installation of images smaller than 128kB.  [#2941]
+
+
+## 2.1.0 [April 2023]
+
+### Added
+- Optimize touch controller communication  [#262]
+- Bootloader redesign  [#1049]
+- Add basic Trezor Model R hardware support  [#2243]
+- Jump and stay in bootloader from firmware through SVC call reverse trampoline.  [#2284]
+- Add RGB LED for Model R  [#2300]
+- Using hardware acceleration (dma2d) for rendering  [#2414]
+- Add stack overflow detection  [#2427]
+- Add model info to image and check when installing/running firmware  [#2623]
+- Introduced bootloader emulator.  [#2879]
+
+### Changed
+- Update logic of vendor header comparison.  [#1599]
+- CPU Frequency increased to 180 MHz  [#2587]
+- Fixed display blinking by increasing backlight PWM frequency  [#2595]
+
+### Fixed
+- Fixed retries counter when reading from USB  [#2896]
+
+### Security
+- Avoid accidental build with broken stack protector  [#1642]
+
+
+## 2.0.4 [May 2022]
+
+### Security
+- Intentionally skipped this version due to fake devices
+
+## 2.0.3 [March 2019]
+
+### Security
+- Enable MPU
+- Introduce delays to USB stack
+
+## 2.0.2 [December 2018]
+
+### Added
+- Support for a new display driver
+
+## 2.0.1 [February 2018]
+
+### Added
+- First public release
+
+[#262]: https://github.com/trezor/trezor-firmware/pull/262
+[#1049]: https://github.com/trezor/trezor-firmware/pull/1049
+[#1599]: https://github.com/trezor/trezor-firmware/pull/1599
+[#1642]: https://github.com/trezor/trezor-firmware/pull/1642
+[#2243]: https://github.com/trezor/trezor-firmware/pull/2243
+[#2284]: https://github.com/trezor/trezor-firmware/pull/2284
+[#2300]: https://github.com/trezor/trezor-firmware/pull/2300
+[#2414]: https://github.com/trezor/trezor-firmware/pull/2414
+[#2427]: https://github.com/trezor/trezor-firmware/pull/2427
+[#2587]: https://github.com/trezor/trezor-firmware/pull/2587
+[#2595]: https://github.com/trezor/trezor-firmware/pull/2595
+[#2623]: https://github.com/trezor/trezor-firmware/pull/2623
+[#2794]: https://github.com/trezor/trezor-firmware/pull/2794
+[#2879]: https://github.com/trezor/trezor-firmware/pull/2879
+[#2896]: https://github.com/trezor/trezor-firmware/pull/2896
+[#2919]: https://github.com/trezor/trezor-firmware/pull/2919
+[#2941]: https://github.com/trezor/trezor-firmware/pull/2941
+[#2955]: https://github.com/trezor/trezor-firmware/pull/2955
+[#2989]: https://github.com/trezor/trezor-firmware/pull/2989
+[#3048]: https://github.com/trezor/trezor-firmware/pull/3048
+[#3122]: https://github.com/trezor/trezor-firmware/pull/3122
+[#3205]: https://github.com/trezor/trezor-firmware/pull/3205
+[#3222]: https://github.com/trezor/trezor-firmware/pull/3222
+[#3303]: https://github.com/trezor/trezor-firmware/pull/3303
+[#3370]: https://github.com/trezor/trezor-firmware/pull/3370
+[#3429]: https://github.com/trezor/trezor-firmware/pull/3429
+[#3709]: https://github.com/trezor/trezor-firmware/pull/3709
+[#3711]: https://github.com/trezor/trezor-firmware/pull/3711
+[#3770]: https://github.com/trezor/trezor-firmware/pull/3770
+[#4081]: https://github.com/trezor/trezor-firmware/pull/4081
+[#4133]: https://github.com/trezor/trezor-firmware/pull/4133
+[#4140]: https://github.com/trezor/trezor-firmware/pull/4140
+[#4195]: https://github.com/trezor/trezor-firmware/pull/4195
+[#4492]: https://github.com/trezor/trezor-firmware/pull/4492
+[#4572]: https://github.com/trezor/trezor-firmware/pull/4572
+[#4649]: https://github.com/trezor/trezor-firmware/pull/4649
+[#4833]: https://github.com/trezor/trezor-firmware/pull/4833
+[#5057]: https://github.com/trezor/trezor-firmware/pull/5057
+[#5155]: https://github.com/trezor/trezor-firmware/pull/5155
+[#5345]: https://github.com/trezor/trezor-firmware/pull/5345
+[#5484]: https://github.com/trezor/trezor-firmware/pull/5484
+[#5857]: https://github.com/trezor/trezor-firmware/pull/5857
+[#5939]: https://github.com/trezor/trezor-firmware/pull/5939
+[#5952]: https://github.com/trezor/trezor-firmware/pull/5952
+[#5993]: https://github.com/trezor/trezor-firmware/pull/5993
+[#6019]: https://github.com/trezor/trezor-firmware/pull/6019
+[#6023]: https://github.com/trezor/trezor-firmware/pull/6023
+[#6225]: https://github.com/trezor/trezor-firmware/pull/6225
+[#6244]: https://github.com/trezor/trezor-firmware/pull/6244
+[#6245]: https://github.com/trezor/trezor-firmware/pull/6245
+[#6307]: https://github.com/trezor/trezor-firmware/pull/6307
+[#6807]: https://github.com/trezor/trezor-firmware/pull/6807

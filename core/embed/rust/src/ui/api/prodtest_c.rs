@@ -1,0 +1,89 @@
+#[cfg(feature = "touch")]
+use cty::int16_t;
+#[cfg(feature = "touch")]
+use heapless::Vec;
+use rtl::CSlice;
+
+use crate::trezorhal::layout_buf::{c_layout_t, LayoutBuffer};
+use crate::trezorhal::sysevent::{parse_event, sysevents_t};
+#[cfg(feature = "touch")]
+use crate::ui::geometry::{Offset, Point, Rect};
+use crate::ui::ui_prodtest::{ProdtestLayoutType, ProdtestUI};
+use crate::ui::ModelUI;
+#[cfg(feature = "touch")]
+use crate::ui::{event::TouchEvent, layout::simplified::touch_unpack};
+
+#[no_mangle]
+unsafe extern "C" fn screen_prodtest_event(
+    layout: *mut c_layout_t,
+    signalled: &sysevents_t,
+) -> u32 {
+    let e = parse_event(signalled);
+    // SAFETY: calling code is supposed to give us exclusive access to an already
+    // initialized layout
+    unsafe {
+        let mut layout = LayoutBuffer::<<ModelUI as ProdtestUI>::CLayoutType>::new(layout);
+        let layout = layout.get_mut();
+        layout.event(e)
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn screen_prodtest_welcome(
+    layout: *mut c_layout_t,
+    id: *const cty::c_char,
+    id_len: u8,
+) {
+    // SAFETY: caller must provide a pointer to `id` that has the same effective
+    // lifetime as `layout`. Then we use `into_unbounded_ascii_str` so that we
+    // can pass the resulting reference for storage in `layout`
+    let id = unsafe { CSlice::from_ptr_and_len(id, id_len as usize).into_unbounded_ascii_str() };
+
+    let mut screen = <ModelUI as ProdtestUI>::CLayoutType::init_welcome(id);
+    screen.show();
+    // SAFETY: calling code is supposed to give us exclusive access to the layout
+    let mut layout = unsafe { LayoutBuffer::new(layout) };
+    layout.store(screen);
+}
+
+#[no_mangle]
+extern "C" fn screen_prodtest_show_text(text: *const cty::c_char, text_len: u8) {
+    let text = unsafe { CSlice::from_ptr_and_len(text, text_len as usize) };
+
+    ModelUI::screen_prodtest_show_text(text.as_ascii_str().unwrap_or_default());
+}
+
+#[no_mangle]
+extern "C" fn screen_prodtest_border() {
+    ModelUI::screen_prodtest_border();
+}
+
+#[no_mangle]
+extern "C" fn screen_prodtest_bars(colors: *const cty::c_char, colors_len: u8) {
+    let colors = unsafe { CSlice::from_ptr_and_len(colors, colors_len as usize) };
+    ModelUI::screen_prodtest_bars(colors.as_ascii_str().unwrap_or_default());
+}
+
+#[no_mangle]
+#[cfg(feature = "touch")]
+extern "C" fn screen_prodtest_touch(x0: int16_t, y0: int16_t, w: int16_t, h: int16_t) {
+    let area = Rect::from_top_left_and_size(Point::new(x0, y0), Offset::new(w, h));
+    ModelUI::screen_prodtest_touch(area);
+}
+
+#[no_mangle]
+#[cfg(feature = "touch")]
+unsafe extern "C" fn screen_prodtest_draw(events: *const cty::uint32_t, events_len: u32) {
+    // SAFETY: caller must provide a valid pointer
+    let events = unsafe { CSlice::from_ptr_and_len(events, events_len as usize) };
+
+    let mut v: Vec<TouchEvent, 256> = Vec::new();
+
+    for e in events.as_slice().iter() {
+        if let Some(event) = touch_unpack(*e) {
+            unwrap!(v.push(event));
+        }
+    }
+
+    ModelUI::screen_prodtest_draw(v);
+}

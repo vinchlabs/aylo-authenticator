@@ -1,0 +1,19 @@
+{
+    "include": [
+        "src",
+        "tools",
+        "translations",
+        "*.py"
+    ],
+    "exclude": [
+        "src/apps/monero",
+        "src/typing.py",
+        "tools/bluez_emu_bridge",
+        "tools/codegen/get_trezor_keys.py",
+        "tools/snippets"
+    ],
+    "stubPath": "mocks/generated",
+    "typeCheckingMode": "basic",
+    "pythonVersion": "3.12",
+    "reportMissingModuleSource": false
+}

@@ -1,0 +1,70 @@
+[package]
+name = "trezor-client"
+version = "0.1.6"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/trezor/trezor-firmware/tree/master/rust/trezor-client"
+repository = "https://github.com/trezor/trezor-firmware"
+description = "Client library for interfacing with Trezor hardware wallet devices"
+keywords = ["ethereum", "bitcoin", "trezor", "wallet"]
+categories = ["api-bindings", "cryptography::cryptocurrencies"]
+readme = "README.md"
+exclude = [
+    ".github/",
+    "examples/",
+    "scripts/",
+    ".clippy.toml",
+    ".gitignore",
+    "rustfmt.toml",
+]
+edition = "2021"
+rust-version = "1.60"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[workspace]
+members = ["build", "."]
+
+[workspace.dependencies]
+# important: keep in sync
+protobuf = "=3.7.2"
+protobuf-codegen = "=3.7.2"
+
+[dependencies]
+protobuf.workspace = true
+byteorder = "1.4"
+rusb = "0.9"
+
+hex = { version = "0.4", default-features = false, features = ["std"] }
+thiserror = "2.0"
+tracing = "0.1"
+
+# bitcoin
+bitcoin = { version = "0.32", optional = true }
+unicode-normalization = { version = "0.1.22", optional = true }
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+serial_test = "3"
+
+[features]
+default = ["bitcoin", "ethereum", "solana"]
+
+# Client implementations
+bitcoin = ["dep:bitcoin", "unicode-normalization"]
+ethereum = []
+
+# Just bindings to the Trezor protobufs
+cardano = []
+eos = []
+evolu = []
+monero = []
+nem = []
+nostr = []
+ripple = []
+solana = []
+stellar = []
+tezos = []
+tron = []
+webauthn = []

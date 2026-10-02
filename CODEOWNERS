@@ -1,0 +1,47 @@
+# overall ownership is for the apps team
+* @obrusvit
+
+# CI and build system
+/.github/ @vdovhanych @mmilata
+/build-docker.sh @tsusanka @andrewkozlik
+/ci/ @vdovhanych @mmilata
+
+# Protobuf definitions
+/common/protob/ @obrusvit @matejcik
+
+# core/embed belongs to embedded team
+/core/embed/ @TychoVrahe
+
+# ...except Rust, which belongs to apps team
+/core/embed/rust/ @obrusvit @matejcik
+/core/embed/rust/src/ui/ @obrusvit
+/core/embed/rust/src/smp/ @TychoVrahe
+
+# special case apps
+/core/src/apps/bitcoin/ @andrewkozlik
+/core/src/apps/monero/ @onvej-sl
+/core/src/apps/webauthn/ @andrewkozlik
+
+# trezor-crypto
+/crypto/ @andrewkozlik @onvej-sl
+/crypto/gui/ @prusnak
+/crypto/monero/ @onvej-sl
+/crypto/tools/ @prusnak
+
+# T1 legacy codebase
+/legacy/ @prusnak @romanz
+
+# Nordic submodule belongs to embedded team
+/nordic/ @TychoVrahe
+
+# python-trezor and tools
+/python/ @matejcik @romanz
+
+# storage
+/storage/ @andrewkozlik @TychoVrahe
+
+# tests main codeowner
+/tests/ @obrusvit
+
+# tools generally belong to apps team
+/tools/ @obrusvit

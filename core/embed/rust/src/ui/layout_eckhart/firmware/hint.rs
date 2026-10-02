@@ -1,0 +1,398 @@
+use super::super::fonts;
+use super::theme;
+use crate::strutil::{ShortString, TString};
+use crate::ui::component::text::TextStyle;
+use crate::ui::component::{Component, Event, EventCtx, Label, Never};
+use crate::ui::constant::screen;
+use crate::ui::display::{Color, Font, Icon};
+use crate::ui::geometry::{Alignment, Alignment2D, Insets, Point, Rect};
+use crate::ui::shape::{self, Renderer, Text};
+use crate::ui::util::Pager;
+
+/// Component rendered above ActionBar, showing one of these:
+///     - a task instruction/hint with optional icon, e.g. "Confirm
+///       transaction",
+///     - a page counter e.g. "1 / 3", meaning the first screen of three total.
+///
+/// The instruction has adaptive height, depending on the text length. The
+/// PageCounter is always of minimal component height (40px).
+pub struct Hint<'a> {
+    content_area: Rect,
+    content: HintContent<'a>,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum HintContent<'a> {
+    Instruction(Instruction<'a>),
+    PageCounter(PageCounter),
+}
+
+impl<'a> Hint<'a> {
+    /// default height of the component [px]
+    pub const HEIGHT_MINIMAL: i16 = 40;
+    /// height of the multi line component [px]
+    pub const HEIGHT_MAXIMAL: i16 = 66;
+
+    fn from_content(content: HintContent<'a>) -> Self {
+        Self {
+            content_area: Rect::zero(),
+            content,
+        }
+    }
+
+    pub fn new_instruction<T: Into<TString<'static>>>(text: T, icon: Option<Icon>) -> Self {
+        let instruction_component =
+            Instruction::new(text.into(), theme::GREY, icon, Some(theme::GREY_LIGHT));
+        Self::from_content(HintContent::Instruction(instruction_component))
+    }
+
+    pub fn new_instruction_green<T: Into<TString<'static>>>(text: T, icon: Option<Icon>) -> Self {
+        let instruction_component = Instruction::new(
+            text.into(),
+            theme::GREEN_LIME,
+            icon,
+            Some(theme::GREEN_LIME),
+        );
+        Self::from_content(HintContent::Instruction(instruction_component))
+    }
+
+    pub fn new_warning_neutral<T: Into<TString<'static>>>(text: T) -> Self {
+        let instruction_component = Instruction::new(
+            text.into(),
+            theme::GREY_LIGHT,
+            Some(theme::ICON_WARNING),
+            Some(theme::YELLOW),
+        );
+        Self::from_content(HintContent::Instruction(instruction_component))
+    }
+
+    pub fn new_warning_caution<T: Into<TString<'static>>>(text: T) -> Self {
+        let instruction_component = Instruction::new(
+            text.into(),
+            theme::GREY,
+            Some(theme::ICON_WARNING),
+            Some(theme::ORANGE),
+        );
+        Self::from_content(HintContent::Instruction(instruction_component))
+    }
+
+    pub fn new_warning_danger<T: Into<TString<'static>>>(text: T) -> Self {
+        let instruction_component = Instruction::new(
+            text.into(),
+            theme::RED,
+            Some(theme::ICON_WARNING),
+            Some(theme::RED),
+        );
+        Self::from_content(HintContent::Instruction(instruction_component))
+    }
+
+    pub fn new_page_counter() -> Self {
+        Self::from_content(HintContent::PageCounter(PageCounter::new()))
+    }
+
+    pub fn update(&mut self, pager: Pager) {
+        if let HintContent::PageCounter(counter) = &mut self.content {
+            counter.update(pager);
+        }
+    }
+
+    /// Returns the height of the content including padding. In case of the
+    /// instruction, the height is calculated based on the text length.
+    pub fn height(&self) -> i16 {
+        let insets = self.content.insets();
+        self.content.height() + insets.top + insets.bottom
+    }
+
+    /// Returns the height of the content without padding.
+    pub fn height_no_padding(&self) -> i16 {
+        self.content.height()
+    }
+
+    /// Returns the width of the content.
+    pub fn width(&self) -> i16 {
+        self.content.width()
+    }
+
+    pub fn is_page_counter(&self) -> bool {
+        matches!(self.content, HintContent::PageCounter(_))
+    }
+}
+
+impl<'a> Component for Hint<'a> {
+    type Msg = Never;
+
+    fn place(&mut self, bounds: Rect) -> Rect {
+        debug_assert!(bounds.width() == screen().width());
+        debug_assert!(bounds.height() == self.height());
+
+        let bounds = bounds.inset(self.content.insets());
+
+        match &mut self.content {
+            HintContent::Instruction(instruction) => {
+                let text_area = match instruction.icon {
+                    Some(_) => bounds.split_left(instruction.icon_width()).1,
+                    None => bounds,
+                };
+                instruction.label.place(text_area);
+            }
+            HintContent::PageCounter(page_counter) => {
+                page_counter.place(bounds);
+            }
+        };
+
+        self.content_area = bounds;
+        self.content_area
+    }
+
+    fn event(&mut self, _ctx: &mut EventCtx, _event: Event) -> Option<Self::Msg> {
+        None
+    }
+
+    fn render<'s>(&'s self, target: &mut impl Renderer<'s>) {
+        self.content.render(self.content_area, target);
+    }
+}
+
+impl<'a> HintContent<'a> {
+    fn height(&self) -> i16 {
+        match self {
+            HintContent::Instruction(instruction) => instruction
+                .height()
+                .clamp(Hint::HEIGHT_MINIMAL, Hint::HEIGHT_MAXIMAL),
+            HintContent::PageCounter(_) => Hint::HEIGHT_MINIMAL,
+        }
+    }
+
+    fn width(&self) -> i16 {
+        match self {
+            HintContent::Instruction(instruction) => instruction.width(),
+            HintContent::PageCounter(page_counter) => page_counter.width(),
+        }
+    }
+
+    fn render<'s>(&'s self, area: Rect, target: &mut impl Renderer<'s>)
+    where
+        's: 'a,
+    {
+        match self {
+            HintContent::Instruction(instruction) => instruction.render(target, area),
+            HintContent::PageCounter(page_counter) => page_counter.render(target),
+        }
+    }
+
+    fn insets(&self) -> Insets {
+        match self {
+            HintContent::Instruction(_) => Instruction::INSETS,
+            HintContent::PageCounter(_) => PageCounter::INSETS,
+        }
+    }
+}
+
+// Helper componet used within Hint for instruction/hint rendering.
+#[derive(Clone)]
+struct Instruction<'a> {
+    label: Label<'a>,
+    text_color: Color,
+    icon: Option<Icon>,
+    icon_color: Option<Color>,
+}
+
+impl<'a> Instruction<'a> {
+    /// default style for instruction text
+    const STYLE_INSTRUCTION: &'static TextStyle = &theme::firmware::TEXT_SMALL;
+    /// margins from the edges of the screen [px]
+    const INSETS: Insets = Insets::new(16, 24, 24, 24);
+
+    fn new(
+        text: TString<'a>,
+        text_color: Color,
+        icon: Option<Icon>,
+        icon_color: Option<Color>,
+    ) -> Self {
+        let mut text_style = *Self::STYLE_INSTRUCTION;
+        text_style.text_color = text_color;
+        Self {
+            label: Label::left_aligned(text, text_style).vertically_centered(),
+            text_color,
+            icon,
+            icon_color,
+        }
+    }
+
+    /// Calculates the width needed for the icon
+    fn icon_width(&self) -> i16 {
+        self.icon
+            .map_or(0, |icon| icon.toif.width() + theme::PADDING)
+    }
+
+    fn width(&self) -> i16 {
+        self.icon_width() + self.label.max_size().x
+    }
+
+    /// Calculates the height needed for the Instruction text to be rendered.
+    fn height(&self) -> i16 {
+        let text_area_width = screen().inset(Self::INSETS).width() - self.icon_width();
+        let calculated_height = self.label.text_height(text_area_width);
+        debug_assert!(calculated_height <= Hint::HEIGHT_MAXIMAL);
+        calculated_height
+    }
+
+    fn render<'s>(&'s self, target: &mut impl Renderer<'s>, area: Rect) {
+        if let Some(icon) = self.icon {
+            shape::ToifImage::new(area.left_center(), icon.toif)
+                .with_align(Alignment2D::CENTER_LEFT)
+                .with_fg(self.icon_color.unwrap_or(self.text_color))
+                .render(target);
+        };
+        // the label got area without the icon in `place` function
+        self.label.render(target);
+    }
+}
+
+/// Helper component used within Hint for page count indication, rendered e.g.
+/// as: '1 / 20'.
+#[derive(Clone)]
+struct PageCounter {
+    area: Rect,
+    pager: Pager,
+    string_curr: ShortString,
+    string_max: ShortString,
+    base_num_curr: Point,
+    base_foreslash: Point,
+    base_num_max: Point,
+    color_num: Color,
+    color_icon: Color,
+}
+
+impl PageCounter {
+    const FONT: Font = fonts::FONT_SATOSHI_REGULAR_22;
+    /// margins from the edges of the screen [px]
+    const INSETS: Insets = Insets::new(16, 24, 14, 12);
+    /// spacing between foreslash and numbers
+    const OFFSET_X: i16 = 4;
+
+    fn new() -> Self {
+        let mut s = Self {
+            pager: Pager::single_page(),
+            area: Rect::zero(),
+            string_curr: ShortString::new(),
+            string_max: ShortString::new(),
+            base_num_curr: Point::zero(),
+            base_foreslash: Point::zero(),
+            base_num_max: Point::zero(),
+            color_num: theme::GREY,
+            color_icon: theme::GREY_DARK,
+        };
+        s.recompute();
+        s
+    }
+
+    fn place(&mut self, area: Rect) -> Rect {
+        self.area = area;
+        self.recompute();
+        self.area
+    }
+
+    fn update(&mut self, pager: Pager) {
+        self.pager = pager;
+        self.recompute();
+    }
+
+    fn recompute(&mut self) {
+        (self.color_num, self.color_icon) = if self.pager.is_last() {
+            (theme::GREEN_LIGHT, theme::GREEN)
+        } else {
+            (theme::GREY, theme::GREY_DARK)
+        };
+
+        self.string_curr = uformat!("{}", self.pager.current() + 1);
+        self.string_max = uformat!("{}", self.pager.total());
+
+        let width_num_curr = Self::FONT.text_width(&self.string_curr);
+        let width_total = self.width();
+
+        let counter_area = self.area.inset(Self::INSETS);
+        let counter_start_x = counter_area.bottom_left().x;
+        let counter_y = Self::FONT.vert_center(counter_area.y0, counter_area.y1, "0");
+        let counter_end_x = counter_start_x + width_total;
+
+        self.base_num_curr = Point::new(counter_start_x, counter_y);
+        self.base_foreslash =
+            Point::new(counter_start_x + width_num_curr + Self::OFFSET_X, counter_y);
+        self.base_num_max = Point::new(counter_end_x, counter_y);
+    }
+
+    fn width(&self) -> i16 {
+        let width_num_curr = Self::FONT.text_width(&self.string_curr);
+        let width_foreslash = theme::ICON_FORESLASH.toif.width();
+        let width_num_max = Self::FONT.text_width(&self.string_max);
+        width_num_curr + width_foreslash + width_num_max + 2 * Self::OFFSET_X
+    }
+
+    fn render<'s>(&'s self, target: &mut impl Renderer<'s>) {
+        Text::new(self.base_num_curr, &self.string_curr, Self::FONT)
+            .with_align(Alignment::Start)
+            .with_fg(self.color_num)
+            .render(target);
+        shape::ToifImage::new(self.base_foreslash, theme::ICON_FORESLASH.toif)
+            .with_align(Alignment2D::BOTTOM_LEFT)
+            .with_fg(self.color_icon)
+            .render(target);
+        Text::new(self.base_num_max, &self.string_max, Self::FONT)
+            .with_align(Alignment::End)
+            .with_fg(self.color_num)
+            .render(target);
+    }
+}
+
+#[cfg(feature = "ui_debug")]
+impl<'a> crate::trace::Trace for Hint<'a> {
+    fn trace(&self, t: &mut dyn crate::trace::Tracer) {
+        t.component("Hint");
+        match &self.content {
+            HintContent::Instruction(i) => {
+                t.child("instruction", &i.label);
+            }
+            HintContent::PageCounter(counter) => {
+                t.int("page curr", counter.pager.current().into());
+                t.int("page max", counter.pager.total().into());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_instruction_hint_height() {
+        // FIXME: this test is fine but the `screen()` is not returning the right value
+        // for eckhart println!("screen size: {:?}", screen().width());
+
+        let with_padding = |h: i16| h + Instruction::INSETS.top + Instruction::INSETS.bottom;
+        let hint_1line = Hint::new_instruction("Test", None);
+        assert_eq!(hint_1line.content.height(), Hint::HEIGHT_MINIMAL);
+        assert_eq!(hint_1line.height(), with_padding(Hint::HEIGHT_MINIMAL));
+
+        let hint_2lines = Hint::new_instruction(
+            "The word appears multiple times in the backup.",
+            Some(theme::ICON_INFO),
+        );
+        assert_eq!(
+            hint_2lines.content.height(),
+            Instruction::STYLE_INSTRUCTION.text_font.text_height() * 2
+        );
+        assert_eq!(
+            hint_2lines.height(),
+            with_padding(Instruction::STYLE_INSTRUCTION.text_font.text_height() * 2)
+        );
+
+        let hint_3lines = Hint::new_instruction(
+            "This is very long instruction which will span across at least three lines of the Hint component.",
+            None,
+        );
+        assert_eq!(hint_3lines.content.height(), Hint::HEIGHT_MAXIMAL);
+        assert_eq!(hint_3lines.height(), with_padding(Hint::HEIGHT_MAXIMAL));
+    }
+}

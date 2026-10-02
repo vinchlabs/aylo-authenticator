@@ -1,0 +1,131 @@
+syntax = "proto2";
+package hw.trezor.messages.solana;
+
+import "messages-common.proto";
+
+// Sugar for easier handling in Java
+option java_outer_classname = "TrezorMessageSolana";
+option java_package = "com.satoshilabs.trezor.lib.protobuf";
+
+/**
+ * Request: Ask device for public key corresponding to address_n path
+ * @start
+ * @next SolanaPublicKey
+ * @next Failure
+ */
+message SolanaGetPublicKey {
+    repeated uint32 address_n = 1;   // BIP-32 path to derive the key from master node
+    optional bool show_display = 2;  // optionally show on display before sending the result
+}
+
+/**
+ * Response: Contains public key derived from device private seed
+ * @end
+ */
+message SolanaPublicKey {
+    required bytes public_key = 1;
+}
+
+/**
+ * Request: Ask device for Solana address
+ * @start
+ * @next SolanaAddress
+ * @next Failure
+ */
+message SolanaGetAddress {
+    repeated uint32 address_n = 1;   // BIP-32 path to derive the key from master node
+    optional bool show_display = 2;  // optionally show on display before sending the result
+    optional bool chunkify = 3;      // display the address in chunks of 4 characters
+}
+
+/**
+ * Response: Contains a Solana address derived from device private seed
+ * @end
+ */
+message SolanaAddress {
+    required string address = 1;  // Solana address as Base58 encoded string
+    optional bytes mac = 2;       // Address authentication code
+}
+
+/**
+ * @embed
+ */
+message SolanaTxTokenAccountInfo {
+    required string base_address = 1;
+    required string token_program = 2;
+    required string token_mint = 3;
+    required string token_account = 4;
+}
+
+/**
+ * @embed
+ */
+message SolanaTxAdditionalInfo {
+    repeated SolanaTxTokenAccountInfo token_accounts_infos = 1;
+    optional bytes encoded_token = 2;
+}
+
+/**
+ * Request: Ask device to sign a Solana transaction
+ * @start
+ * @next SolanaTxSignature
+ * @next Failure
+ */
+message SolanaSignTx {
+    repeated uint32 address_n = 1;                   // BIP-32 path to derive the key to sign with
+    required bytes serialized_tx = 2;                // serialized tx to be signed
+    optional SolanaTxAdditionalInfo additional_info = 3;
+    optional common.PaymentRequest payment_req = 4;  // SLIP-24 payment request
+    optional bool chunkify = 5;                      // display the address in chunks of 4 characters
+}
+
+/**
+ * Response: Contains the transaction signature
+ * @end
+ */
+message SolanaTxSignature {
+    required bytes signature = 1;  // tx signature
+}
+
+/**
+ * @embed
+ */
+message SolanaOffchainMessageV1 {
+    required string message = 1;
+    repeated bytes signers = 2;
+}
+
+/**
+ * Request: Ask device to sign a Solana off-chain message
+ * @start
+ * @next SolanaMessageSignature
+ * @next Failure
+ */
+message SolanaSignMessage {
+    repeated uint32 address_n = 1;  // BIP-32 path to derive the key to sign with
+    reserved 2;                     // deprecated: message in OCMS v0 format
+    optional bool chunkify = 3;     // display the address in chunks of 4 characters
+    required SolanaOffchainMessageV1 message = 4;
+}
+
+/**
+ * Response: Contains the message signature
+ * @end
+ */
+message SolanaMessageSignature {
+    required bytes signature = 1;    // message signature
+    optional bytes signed_data = 2;  // serialized message that was signed
+}
+
+/**
+ * Request: Ask device to verify a Solana off-chain message signature(s)
+ * @start
+ * @next Success
+ * @next Failure
+ */
+message SolanaVerifyMessage {
+    reserved 1;                     // deprecated: message in OCMS v0 format with an envelope
+    optional bool chunkify = 2;     // display the address in chunks of 4 characters
+    required SolanaOffchainMessageV1 message = 3;
+    repeated bytes signatures = 4;  // signatures to verify, order must match the order of message.signers
+}

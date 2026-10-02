@@ -1,0 +1,9 @@
+bootloader/
+modules/
+nrf/
+nrfxlib/
+test/
+tools/
+trezor/**/build*/
+zephyr/
+.west/

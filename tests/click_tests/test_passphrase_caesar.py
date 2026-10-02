@@ -1,0 +1,273 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+from collections.abc import Generator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Optional
+
+import pytest
+
+from trezorlib import exceptions, messages
+from trezorlib.client import PassphraseSetting
+from trezorlib.debuglink import DebugSession as Session
+
+from ..common import TEST_ADDRESS_N
+from .common import (
+    CommonPass,
+    KeyboardCategory,
+    get_char_category,
+    navigate_to_action_and_press,
+)
+
+if TYPE_CHECKING:
+    from trezorlib.debuglink import DebugLink
+
+    from ..device_handler import BackgroundDeviceHandler
+
+
+pytestmark = pytest.mark.models("safe3")
+
+BACK = "inputs__back"
+SHOW = "inputs__show"
+ENTER = "inputs__enter"
+SPACE = "inputs__space"
+CANCEL_OR_DELETE = ("inputs__cancel", "inputs__delete")
+# fmt: off
+MENU_ACTIONS = [SHOW, CANCEL_OR_DELETE, ENTER, "abc", "ABC", "123", "#$!", SPACE]
+DIGITS_ACTIONS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", BACK]
+LOWERCASE_ACTIONS = [
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s",
+    "t", "u", "v", "w", "x", "y", "z", BACK
+]
+UPPERCASE_ACTIONS = [
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S",
+    "T", "U", "V", "W", "X", "Y", "Z", BACK
+]
+SPECIAL_ACTIONS = [
+    "_", "<", ">", ".", ":", "@", "/", "|", "\\", "!", "(", ")", "+", "%", "&", "-", "[", "]", "?",
+    "{", "}", ",", "'", "`", ";", "\"", "~", "$", "^", "=", "*", "#", BACK
+]
+# fmt: on
+
+
+CATEGORY_ACTIONS = {
+    KeyboardCategory.Menu: MENU_ACTIONS,
+    KeyboardCategory.Numeric: DIGITS_ACTIONS,
+    KeyboardCategory.LettersLower: LOWERCASE_ACTIONS,
+    KeyboardCategory.LettersUpper: UPPERCASE_ACTIONS,
+    KeyboardCategory.Special: SPECIAL_ACTIONS,
+}
+
+
+def _get_test_address(session: Session) -> str:
+    resp = session.call_raw(
+        messages.GetAddress(address_n=TEST_ADDRESS_N, coin_name="Testnet")
+    )
+    if isinstance(resp, messages.ButtonRequest):
+        resp = session.client.app._callback_button(resp)
+    if isinstance(resp, messages.PassphraseRequest):
+        resp = session.call_raw(messages.PassphraseAck(on_device=True))
+    if isinstance(resp, messages.ButtonRequest):
+        resp = session.client.app._callback_button(resp)
+    if isinstance(resp, messages.Address):
+        return resp.address
+    else:
+        raise exceptions.Cancelled
+
+
+@contextmanager
+def prepare_passphrase_dialogue(
+    device_handler: "BackgroundDeviceHandler", address: Optional[str] = None
+) -> Generator["DebugLink", None, None]:
+    debug = device_handler.debuglink()
+    device_handler.get_session(passphrase=PassphraseSetting.ON_DEVICE)
+    layout = debug.synchronize_at("PassphraseKeyboard")
+    assert layout.passphrase() == ""
+    assert _current_category(debug) == KeyboardCategory.Menu
+
+    yield debug
+    session = device_handler.result()
+
+    device_handler.run_with_provided_session(session, _get_test_address)  # type: ignore
+    result = device_handler.result()
+    if address is not None:
+        assert result == address
+
+
+def _current_category(debug: "DebugLink") -> KeyboardCategory:
+    """What is the current category we are in"""
+    layout = debug.read_layout()
+    category = layout.find_unique_value_by_key("current_category", "")
+    return KeyboardCategory(category)
+
+
+def _current_actions(debug: "DebugLink") -> list[str]:
+    """What are the actions in the current category"""
+    current = _current_category(debug)
+    return CATEGORY_ACTIONS[current]
+
+
+def go_to_category(
+    debug: "DebugLink", category: KeyboardCategory, use_carousel: bool = True
+) -> None:
+    """Go to a specific category"""
+    # Already there
+    if _current_category(debug) == category:
+        return
+
+    # Need to be in MENU anytime to change category
+    if _current_category(debug) != KeyboardCategory.Menu:
+        navigate_to_action_and_press(
+            debug, BACK, _current_actions(debug), is_carousel=use_carousel
+        )
+
+    assert _current_category(debug) == KeyboardCategory.Menu
+
+    # Go to the right one, unless we want MENU
+    if category != KeyboardCategory.Menu:
+        navigate_to_action_and_press(
+            debug, category.value, _current_actions(debug), is_carousel=use_carousel
+        )
+
+    assert _current_category(debug) == category
+
+
+def press_char(debug: "DebugLink", char: str) -> None:
+    """Press a character"""
+    # Space is a special case
+    if char == " ":
+        go_to_category(debug, KeyboardCategory.Menu)
+        navigate_to_action_and_press(debug, SPACE, _current_actions(debug))
+    else:
+        char_category = get_char_category(char)
+        go_to_category(debug, char_category)
+        navigate_to_action_and_press(debug, char, _current_actions(debug))
+
+
+def input_passphrase(debug: "DebugLink", passphrase: str) -> None:
+    """Input a passphrase with validation it got added"""
+    before = debug.read_layout().passphrase()
+    for char in passphrase:
+        press_char(debug, char)
+    after = debug.read_layout().passphrase()
+    assert after == before + passphrase
+
+
+def show_passphrase(debug: "DebugLink") -> None:
+    """Show a passphrase"""
+    go_to_category(debug, KeyboardCategory.Menu)
+    navigate_to_action_and_press(debug, SHOW, _current_actions(debug))
+
+
+def enter_passphrase(debug: "DebugLink") -> None:
+    """Enter a passphrase"""
+    go_to_category(debug, KeyboardCategory.Menu)
+    navigate_to_action_and_press(debug, ENTER, _current_actions(debug))
+
+
+def delete_char(debug: "DebugLink") -> None:
+    """Deletes the last char"""
+    go_to_category(debug, KeyboardCategory.Menu)
+    navigate_to_action_and_press(debug, CANCEL_OR_DELETE, _current_actions(debug))
+
+
+def cancel(debug: "DebugLink") -> None:
+    """Cancels the whole dialogue - clicking the same button as in DELETE"""
+    delete_char(debug)
+
+
+VECTORS = (  # passphrase, address
+    pytest.param(CommonPass.SHORT, CommonPass.SHORT_ADDRESS, id="short"),
+    pytest.param(CommonPass.WITH_SPACE, CommonPass.WITH_SPACE_ADDRESS, id="with_space"),
+    pytest.param(CommonPass.RANDOM_25, CommonPass.RANDOM_25_ADDRESS, id="random_25"),
+    pytest.param(
+        CommonPass.WWW_SHORTER, CommonPass.WWW_SHORTER_ADDRESS, id="www_shorter"
+    ),
+    pytest.param(CommonPass.WWW_LIMIT, CommonPass.WWW_LIMIT_ADDRESS, id="www_limit"),
+)
+
+
+@pytest.mark.parametrize("passphrase, address", VECTORS)
+@pytest.mark.setup_client(passphrase=True)
+def test_passphrase_input(
+    device_handler: "BackgroundDeviceHandler", passphrase: str, address: str
+):
+    with prepare_passphrase_dialogue(device_handler, address) as debug:
+        input_passphrase(debug, passphrase)
+        show_passphrase(debug)
+        enter_passphrase(debug)
+
+
+@pytest.mark.setup_client(passphrase=True)
+def test_passphrase_input_over_limit(device_handler: "BackgroundDeviceHandler"):
+    with prepare_passphrase_dialogue(
+        device_handler, CommonPass.WWW_LIMIT_ADDRESS
+    ) as debug:  # type: ignore
+        # First `len(CommonPass.WWW_LIMIT)` chars
+        input_passphrase(debug, CommonPass.WWW_LONGER[:-1])
+        layout = debug.read_layout()
+        assert CommonPass.WWW_LONGER[:-1] == layout.passphrase()
+
+        show_passphrase(debug)
+
+        # Over-limit character
+        press_char(debug, CommonPass.WWW_LONGER[-1])
+
+        # No change
+        layout = debug.read_layout()
+        assert CommonPass.WWW_LONGER[:-1] == layout.passphrase()
+        assert CommonPass.WWW_LONGER != layout.passphrase()
+
+        show_passphrase(debug)
+        enter_passphrase(debug)
+
+
+@pytest.mark.setup_client(passphrase=True)
+def test_passphrase_delete(device_handler: "BackgroundDeviceHandler"):
+    with prepare_passphrase_dialogue(device_handler, CommonPass.SHORT_ADDRESS) as debug:
+        input_passphrase(debug, CommonPass.SHORT[:8])
+        show_passphrase(debug)
+
+        for _ in range(4):
+            delete_char(debug)
+        show_passphrase(debug)
+
+        input_passphrase(debug, CommonPass.SHORT[8 - 4 :])
+        show_passphrase(debug)
+        enter_passphrase(debug)
+
+
+@pytest.mark.setup_client(passphrase=True)
+def test_cancel(device_handler: "BackgroundDeviceHandler"):
+    with pytest.raises(exceptions.Cancelled):
+        with prepare_passphrase_dialogue(device_handler) as debug:
+            input_passphrase(debug, "abc")
+            show_passphrase(debug)
+            for _ in range(3):
+                delete_char(debug)
+            show_passphrase(debug)
+            cancel(debug)
+
+
+@pytest.mark.setup_client(passphrase=True)
+def test_passphrase_loop_all_characters(device_handler: "BackgroundDeviceHandler"):
+    with prepare_passphrase_dialogue(device_handler, CommonPass.EMPTY_ADDRESS) as debug:
+        for category in KeyboardCategory:
+            go_to_category(debug, category)
+            # use_carousel=False because we want to reach BACK at the end of the list
+            go_to_category(debug, KeyboardCategory.Menu, use_carousel=False)
+
+        enter_passphrase(debug)

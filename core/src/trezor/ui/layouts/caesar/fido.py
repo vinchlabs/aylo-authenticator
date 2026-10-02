@@ -1,0 +1,51 @@
+import trezorui_api
+from trezor.enums import ButtonRequestType
+from trezor.ui.layouts import show_error_and_raise
+
+from ..common import interact, interact_simple
+
+
+async def confirm_fido(
+    header: str,
+    app_name: str,
+    _icon_name: str | None,  # unused on caesar
+    accounts: list[str | None],
+) -> int:
+    """Webauthn confirmation for one or more credentials."""
+    with trezorui_api.confirm_fido(
+        title=header,
+        app_name=app_name,
+        icon_name=None,
+        accounts=accounts,
+    ) as confirm:
+        result = await interact(confirm, "confirm_fido", ButtonRequestType.Other)
+
+    if isinstance(result, int):
+        return result
+
+    # For the usage in device tests, assuming CONFIRMED (sent by debuglink)
+    # is choosing the first credential.
+    if __debug__ and result is trezorui_api.CONFIRMED:
+        return 0
+
+    raise RuntimeError  # should not get here, cancellation is handled by `interact`
+
+
+async def confirm_fido_reset() -> bool:
+    from trezor import TR
+
+    with trezorui_api.confirm_action(
+        title=TR.fido__title_reset,
+        description=TR.fido__wanna_erase_credentials,
+        action=None,
+        verb_cancel="",
+        verb=TR.buttons__confirm,
+    ) as confirm:
+        return await interact_simple(confirm) is trezorui_api.CONFIRMED
+
+
+async def credential_warning(br_name: str, content: str) -> None:
+    await show_error_and_raise(
+        br_name=br_name,
+        content=content,
+    )

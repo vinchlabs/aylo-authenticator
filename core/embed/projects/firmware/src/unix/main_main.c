@@ -1,0 +1,265 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdlib.h>
+
+#include <trezor_model.h>
+#include <trezor_rtl.h>
+
+#include <io/display.h>
+#include <io/rsod.h>
+#include <io/usb_config.h>
+#include <sec/monoctr.h>
+#include <sec/rsod_special.h>
+#include <sec/unit_properties.h>
+#include <sys/applet.h>
+#include <sys/bootutils.h>
+#include <sys/coreapp.h>
+#include <sys/flash.h>
+#include <sys/flash_otp.h>
+#include <sys/startup_args.h>
+#include <sys/system.h>
+#include <sys/systick.h>
+#include <sys/systimer.h>
+
+#ifdef USE_APP_LOADING
+#include <io/app_arena.h>
+#endif
+
+#ifdef USE_BUTTON
+#include <io/button.h>
+#endif
+
+#ifdef USE_BLE
+#include <io/ble.h>
+#endif
+
+#ifdef USE_HAPTIC
+#include <io/haptic.h>
+#endif
+
+#ifdef USE_POWER_MANAGER
+#include <io/power_manager.h>
+#endif
+
+#ifdef USE_TOUCH
+#include <io/touch.h>
+#endif
+
+#ifdef USE_TROPIC
+#include <sec/tropic.h>
+#endif
+
+#ifdef USE_SECP256K1_ZKP
+#include "zkp_context.h"
+#endif
+
+#ifdef USE_SECRET
+#include <sec/secret.h>
+#endif
+
+#ifdef USE_MCU_ATTESTATION
+#include <sec/mcu_attestation.h>
+#endif
+
+#include <SDL3/SDL.h>
+
+#include "../../version.h"
+
+static void drivers_deinit(void) { flash_deinit(); }
+
+static void drivers_init(void) {
+  flash_init();
+  flash_otp_init();
+
+  monoctr_init();
+
+  unit_properties_init();
+
+  display_init(DISPLAY_RESET_CONTENT);
+
+#if USE_TOUCH
+  touch_init();
+#endif
+
+#ifdef USE_BUTTON
+  button_init();
+#endif
+
+#ifdef USE_TROPIC
+  ensure_true(tropic_init(NULL) == LT_OK,
+              "Failed to initialize Tropic driver. Make sure the "
+              "`model_server` is running.");
+  ensure(tropic_ensure_configuration(), "Tropic configuration check failed");
+#endif
+
+  usb_configure(NULL);
+
+#ifdef USE_BLE
+  ble_init();
+#endif
+
+#ifdef USE_HAPTIC
+  ts_t status = haptic_init();
+  UNUSED(status);
+#endif
+
+#ifdef USE_POWER_MANAGER
+  pm_init(true);
+#endif
+
+#ifdef USE_APP_LOADING
+  app_arena_init();
+#endif
+}
+
+static uintptr_t throw_exit_exception_trampoline(uintptr_t code,
+                                                 uintptr_t unused1,
+                                                 uintptr_t unused2) {
+  extern void coreapp_throw_exit_exception(int code);
+  UNUSED(unused1);
+  UNUSED(unused2);
+  coreapp_throw_exit_exception((int)code);
+  return 0;
+}
+
+// Throws MicroPython SystemExit exception in the context of the given task
+static void throw_exit_exception(systask_t *task, int code) {
+  // Push call to the task
+  if (!systask_push_call(task, (void *)throw_exit_exception_trampoline,
+                         (uintptr_t)code, 0, 0)) {
+    error_shutdown("Cannot throw exit exception");
+  }
+  // Yield to the task and throw the exception
+  systask_yield_to(task);
+  // We are back and the task should be terminated by now
+}
+
+static bool sdl_event_filter(void *userdata, SDL_Event *event) {
+  applet_t *coreapp = (applet_t *)userdata;
+
+  switch (event->type) {
+    case SDL_EVENT_QUIT:
+      throw_exit_exception(&coreapp->task, 0);
+      return false;
+    case SDL_EVENT_KEY_UP:
+      if (event->key.repeat) {
+        return false;
+      }
+      switch (event->key.key) {
+        case SDLK_ESCAPE:
+          throw_exit_exception(&coreapp->task, 0);
+          return false;
+        case SDLK_S:
+          display_save("emu");
+          return false;
+      }
+      break;
+  }
+  return true;
+}
+
+// Can be used to get basic emulator properties before regularly starting it.
+// Needs to be called before it starts listening on UDP sockets in case there
+// are multiple copies of the process called, e.g. from multicore tests.
+static void print_emulator_properties_and_exit(void) {
+  printf("{\"internal_model\": \"%s\",\n", MODEL_INTERNAL_NAME);
+#ifdef USE_TROPIC
+  printf(" \"tropic\": true,\n");
+#endif
+#ifdef USE_BLE
+  printf(" \"ble\": true,\n");
+#endif
+  printf(" \"version\": \"%d.%d.%d.%d\"}\n", VERSION_MAJOR, VERSION_MINOR,
+         VERSION_PATCH, VERSION_BUILD);
+  exit(0);
+}
+
+// Kernel task main loop
+//
+// Returns when the coreapp task is terminated
+static void kernel_loop(applet_t *coreapp) {
+  do {
+    sysevents_t awaited = {0};
+    sysevents_t signalled = {0};
+
+    sysevents_poll(&awaited, &signalled, ticks_timeout(100));
+
+  } while (applet_is_alive(coreapp));
+}
+
+int main(int argc, char **argv) {
+  system_init(&rsod_panic_handler);
+
+  if (argc > 1 && strcmp(argv[1], "--emulator-properties") == 0) {
+    print_emulator_properties_and_exit();
+  }
+
+#ifdef USE_MCU_ATTESTATION
+  {
+    uint8_t mcu_device_cert[MCU_ATTESTATION_MAX_CERT_SIZE];
+    size_t mcu_device_cert_size = 0;
+    if (sectrue == secret_mcu_device_cert_read(mcu_device_cert,
+                                               sizeof(mcu_device_cert),
+                                               &mcu_device_cert_size)) {
+      startup_args_add(STARTUP_ARGS_TYPE_MCU_DEVICE_CERT, mcu_device_cert,
+                       mcu_device_cert_size);
+    }
+  }
+#endif
+
+#if defined(USE_SECRET) && defined(LOCKABLE_BOOTLOADER)
+  secret_lock_bootloader();
+#endif
+
+#ifdef USE_SECP256K1_ZKP
+  ensure(sectrue * (zkp_context_init() == 0), NULL);
+#endif
+
+  // Simulate the bootloader passing startup_args to firmware.
+  startup_args_import(startup_args_export());
+
+  drivers_init();
+
+  applet_t coreapp;
+
+  // Initialize coreapp task
+  if (!coreapp_init(&coreapp, argc, argv)) {
+    error_shutdown("Cannot start coreapp");
+  }
+
+  // Set SDL event filter to catch quit events
+  SDL_SetEventFilter(sdl_event_filter, &coreapp);
+
+  // Run the coreapp task
+  applet_run(&coreapp);
+
+  // Loop until the coreapp task is terminated
+  kernel_loop(&coreapp);
+
+  // Show RSOD if the coreapp task did not exit cleanly
+  if (coreapp.task.pminfo.reason != TASK_TERM_REASON_EXIT) {
+    rsod_gui(&coreapp.task.pminfo);
+    reboot_or_halt_after_rsod();
+  }
+
+  drivers_deinit();
+
+  return coreapp.task.pminfo.exit.code;
+}

@@ -1,0 +1,83 @@
+use crate::ui::button_request::ButtonRequest;
+use crate::ui::component::base::AttachType;
+use crate::ui::component::{Event, EventCtx};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LayoutState {
+    Initial,
+    Attached(Option<ButtonRequest>),
+    Transitioning(AttachType),
+    Done,
+}
+
+pub struct PaintOutOfBounds;
+
+pub trait Layout {
+    type Value;
+
+    fn place(&mut self);
+    fn event(&mut self, ctx: &mut EventCtx, event: Event) -> Option<LayoutState>;
+    fn take_value(&mut self) -> Option<Self::Value>;
+    fn paint(&mut self) -> Result<(), PaintOutOfBounds>;
+}
+
+#[cfg(feature = "micropython")]
+mod micropython {
+    use super::LayoutState;
+    use crate::micropython::macros::{obj_dict, obj_map, obj_type};
+    use crate::micropython::qstr::Qstr;
+    use crate::micropython::simple_type::SimpleTypeObj;
+    use crate::micropython::typ::FullType;
+    use crate::micropython::Obj;
+
+    static STATE_INITIAL_TYPE: FullType = obj_type! {
+        name: Qstr::MP_QSTR_INITIAL,
+        base: LAYOUT_STATE_TYPE.as_type(),
+    };
+
+    static STATE_ATTACHED_TYPE: FullType = obj_type! {
+        name: Qstr::MP_QSTR_ATTACHED,
+        base: LAYOUT_STATE_TYPE.as_type(),
+    };
+
+    static STATE_TRANSITIONING_TYPE: FullType = obj_type! {
+        name: Qstr::MP_QSTR_TRANSITIONING,
+        base: LAYOUT_STATE_TYPE.as_type(),
+    };
+
+    static STATE_DONE_TYPE: FullType = obj_type! {
+        name: Qstr::MP_QSTR_DONE,
+        base: LAYOUT_STATE_TYPE.as_type(),
+    };
+
+    pub static STATE_INITIAL: SimpleTypeObj = SimpleTypeObj::new(&STATE_INITIAL_TYPE);
+    pub static STATE_ATTACHED: SimpleTypeObj = SimpleTypeObj::new(&STATE_ATTACHED_TYPE);
+    pub static STATE_TRANSITIONING: SimpleTypeObj = SimpleTypeObj::new(&STATE_TRANSITIONING_TYPE);
+    pub static STATE_DONE: SimpleTypeObj = SimpleTypeObj::new(&STATE_DONE_TYPE);
+
+    static LAYOUT_STATE_TYPE: FullType = obj_type! {
+        name: Qstr::MP_QSTR_LayoutState,
+        locals: &obj_dict! { obj_map! {
+            Qstr::MP_QSTR_INITIAL => STATE_INITIAL.as_obj(),
+            Qstr::MP_QSTR_ATTACHED => STATE_ATTACHED.as_obj(),
+            Qstr::MP_QSTR_TRANSITIONING => STATE_TRANSITIONING.as_obj(),
+            Qstr::MP_QSTR_DONE => STATE_DONE.as_obj(),
+        } },
+    };
+
+    pub static LAYOUT_STATE: SimpleTypeObj = SimpleTypeObj::new(&LAYOUT_STATE_TYPE);
+
+    impl From<LayoutState> for Obj {
+        fn from(state: LayoutState) -> Self {
+            match state {
+                LayoutState::Initial => STATE_INITIAL.as_obj(),
+                LayoutState::Attached(_) => STATE_ATTACHED.as_obj(),
+                LayoutState::Transitioning(_) => STATE_TRANSITIONING.as_obj(),
+                LayoutState::Done => STATE_DONE.as_obj(),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "micropython")]
+pub use micropython::*;

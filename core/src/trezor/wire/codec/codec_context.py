@@ -1,0 +1,133 @@
+from typing import TYPE_CHECKING
+
+from trezor import protobuf, utils
+from trezor.wire.codec import codec_v1
+from trezor.wire.context import UnexpectedMessageException
+from trezor.wire.message_handler import wrap_protobuf_load
+from trezor.wire.protocol_common import Context, Message
+
+if __debug__:
+    from trezor import log
+
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Container
+    from typing import TypeVar
+
+    from storage.cache_common import DataCache
+
+    from .. import Provider, WireInterface
+
+    LoadedMessageType = TypeVar("LoadedMessageType", bound=protobuf.MessageType)
+
+
+class CodecContext(Context):
+    """ "Wire context" for `protocol_v1`."""
+
+    def __init__(
+        self,
+        iface: WireInterface,
+        buffer_provider: Provider[bytearray],
+    ) -> None:
+        self.buffer_provider = buffer_provider
+        self._buffer = None
+        super().__init__(iface)
+
+    def _get_buffer(self) -> bytearray | None:
+        if self._buffer is None:
+            self._buffer = self.buffer_provider.take()
+        return self._buffer
+
+    def read_from_wire(self) -> Awaitable[Message]:
+        """Read a whole message from the wire without parsing it."""
+        return codec_v1.read_message(self.iface, self._get_buffer)
+
+    async def read(
+        self,
+        expected_types: Container[int] | None,
+        expected_type: type[protobuf.MessageType] | None = None,
+    ) -> protobuf.MessageType:
+        if __debug__:
+            log.debug(
+                __name__,
+                "expect: %s",
+                expected_type.MESSAGE_NAME if expected_type else expected_types,
+                iface=self.iface,
+            )
+
+        # Load the full message into a buffer, parse out type and data payload
+        msg = await self.read_from_wire()
+
+        # If we got a message with unexpected type, raise the message via
+        # `UnexpectedMessageError` and let the session handler deal with it.
+        if not expected_types or msg.type not in expected_types:
+            raise UnexpectedMessageException(msg)
+
+        if expected_type is None:
+            expected_type = protobuf.type_for_wire(
+                self.message_type_enum_name, msg.type
+            )
+
+        if __debug__:
+            log.debug(
+                __name__,
+                "read: %s",
+                expected_type.MESSAGE_NAME,
+                iface=self.iface,
+            )
+
+        # look up the protobuf class and parse the message
+        return wrap_protobuf_load(msg.data, expected_type)
+
+    async def write(self, msg: protobuf.MessageType) -> None:
+        if __debug__:
+            log.debug(
+                __name__,
+                "write: %s",
+                msg.MESSAGE_NAME,
+                iface=self.iface,
+            )
+
+        # cannot write message without wire type
+        assert msg.MESSAGE_WIRE_TYPE is not None
+
+        msg_size = protobuf.encoded_length(msg)
+
+        buffer = self._get_buffer()
+        if buffer is None:
+            if msg_size > 128:
+                raise IOError
+            # allow sending small responses (for error reporting when another session is in progress)
+            buffer = bytearray(msg_size)
+
+        # try to reuse reallocated buffer
+        if msg_size > len(buffer):
+            # message is too big, we need to allocate a new buffer
+            buffer = bytearray(msg_size)
+
+        msg_size = protobuf.encode(buffer, msg)
+        await codec_v1.write_message(
+            self.iface,
+            msg.MESSAGE_WIRE_TYPE,
+            memoryview(buffer)[:msg_size],
+        )
+
+    if not utils.USE_THP:
+        # Note: we use the above CodecContext functionality for DebugLink on PYOPT=0 builds.
+        # The methods below are excluded for THP builds, since cache_codec is not available.
+
+        def release(self) -> None:
+            from storage.cache_codec import end_current_session
+
+            end_current_session()
+
+        # ACCESS TO CACHE
+        @property
+        def cache(self) -> DataCache:
+            from storage.cache_codec import get_active_session
+            from storage.cache_common import InvalidSessionError
+
+            c = get_active_session()
+            if c is None:
+                raise InvalidSessionError()
+            return c

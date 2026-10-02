@@ -1,0 +1,29 @@
+# Project-specific configuration
+
+# Filter of the model/board defined features for this specific project
+uses = [
+    "backlight",
+    "boot_ucb",
+    "display",
+    "dma2d",
+    "framebuffer",
+    "hash_processor",
+    "lockable_bootloader",
+    "power_manager",
+    "pvd",
+    "sd_card",
+    "sdram",
+    "secret",
+    "secure_aes",
+    "tamper",
+]
+
+elf_sections = [".vector_table", ".text", ".data", ".rodata", ".capabilities"]
+
+# Build options mapped to the cargo features they activate on this project.
+# vcp is intentionally unmapped: the boardloader has no VCP console.
+[build-options]
+asan             = { true = ["asan"] }
+production       = { true = ["production"] }
+bootloader-devel = { true = ["bootloader_devel"] }
+dbg-console      = { swo = ["dbg_console_swo"], system-view = ["dbg_console_system_view"] }

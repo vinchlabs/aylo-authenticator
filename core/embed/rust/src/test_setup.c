@@ -1,0 +1,78 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <trezor_rtl.h>
+
+#include <io/display.h>
+#include <io/usb_config.h>
+#include <sec/unit_properties.h>
+#include <sys/flash.h>
+#include <sys/flash_otp.h>
+#include <sys/system.h>
+
+#ifdef USE_BUTTON
+#include <io/button.h>
+#endif
+
+#ifdef USE_TOUCH
+#include <io/touch.h>
+#endif
+
+#ifdef USE_TROPIC
+#include <sec/tropic.h>
+#endif
+
+#include <stdlib.h>
+#include "py/builtin.h"
+
+void rust_tests_c_setup(void) {
+  system_init(NULL);
+
+  flash_init();
+  flash_otp_init();
+
+  unit_properties_init();
+
+  display_init(DISPLAY_RESET_CONTENT);
+
+#if USE_TOUCH
+  touch_init();
+#endif
+
+#ifdef USE_BUTTON
+  button_init();
+#endif
+
+#ifdef USE_TROPIC
+  ensure_true(tropic_init(NULL) == LT_OK, "Failed to initialize Tropic driver");
+#endif
+
+  usb_configure(NULL);
+}
+
+void nlr_jump_fail(void *val) {
+  printf("FATAL: uncaught NLR %p\n", val);
+  exit(1);
+}
+
+static void stderr_print_strn(void *env, const char *str, size_t len) {
+  printf("%.*s", (int)len, str);
+}
+
+const mp_print_t mp_stderr_print = {NULL, stderr_print_strn};

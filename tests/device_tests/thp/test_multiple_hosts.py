@@ -1,0 +1,170 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import threading
+import time
+
+import pytest
+
+from trezorlib.debuglink import TrezorTestContext
+from trezorlib.thp.channel import Channel
+from trezorlib.thp.exceptions import ThpError, ThpErrorCode
+from trezorlib.thp.pairing import PairingController
+
+from .connect import prepare_channel_for_pairing
+
+Client = TrezorTestContext
+pytestmark = [pytest.mark.protocol("thp")]
+
+
+def _new_channel(client) -> Channel:
+    channel = Channel.allocate(client.transport)
+    channel._init_noise()
+    return channel
+
+
+def test_concurrent_handshakes(client: Client) -> None:
+    MAX = 4  # See `MAX_CHANNELS_OPENING` in core/embed/rust/src/thp/mod.rs
+    channels = []
+
+    # Start the handshake for MAX+1 channels
+    for _ in range(MAX + 1):
+        channel = _new_channel(client)
+        channel.BUSY_RETRIES = 0
+        channel._send_handshake_init_request(unlock=False)
+        channel._read_handshake_init_response()
+        channels.append(channel)
+
+    # Oldest handshake is forgotten
+    with pytest.raises(ThpError) as err:
+        channels[0]._send_handshake_completion_request([])
+        channels[0]._read_handshake_completion_response()
+    assert err.value.code == ThpErrorCode.UNALLOCATED_CHANNEL
+
+    # Others finish successfully
+    for channel in channels[1:]:
+        channel._send_handshake_completion_request([])
+        channel._read_handshake_completion_response()
+        channel._flush_ack()
+
+    assert all(channel.is_open() for channel in channels[1:])
+
+
+def test_concurrent_handshakes_busy_retries(client: Client) -> None:
+    channel_1 = _new_channel(client)
+    channel_2 = _new_channel(client)
+
+    channel_1._send_handshake_init_request(unlock=False)
+    channel_1._read_handshake_init_response()
+
+    def continue_handshake():
+        time.sleep(1)
+        channel_1._send_handshake_completion_request([])
+        channel_1._read_handshake_completion_response()
+
+    # continue the handshake after a delay
+    # make sure to create a daemon thread that will be killed when the main thread exits
+    t = threading.Thread(target=continue_handshake, daemon=True)
+    t.start()
+
+    # try to open the second channel concurrently
+    # backoff is long enough to allow the first handshake to complete
+    channel_2.BUSY_BACKOFF_TIME = 5
+    # opening the channel will succeed after a backoff retry
+    channel_2.open([])
+
+    # clean up after the daemon thread
+    t.join()
+
+    # both channels should be open
+    assert channel_1.is_open()
+    assert channel_2.is_open()
+
+
+def test_concurrent_channels(test_ctx: TrezorTestContext) -> None:
+    MAX = 10  # See `MAX_CHANNELS_APPDATA` in core/embed/rust/src/thp/mod.rs
+    channels = []
+
+    # Open MAX+1 channels
+    for _ in range(MAX + 1):
+        pairing = prepare_channel_for_pairing(test_ctx)
+        pairing.skip()
+        pairing.finish()
+        channels.append(pairing.client.channel)
+
+    # Oldest channel gets evicted
+    with pytest.raises(ThpError) as err:
+        test_ctx.channel = channels[0]
+        test_ctx.ping("will raise")
+    assert err.value.code == ThpErrorCode.UNALLOCATED_CHANNEL
+
+    # Others keep working
+    for channel in channels[1:]:
+        test_ctx.channel = channel
+        test_ctx.ping("hi")
+
+    for channel in channels[1:]:
+        test_ctx.channel = channel
+        test_ctx.ping("hi2")
+
+
+def _open_channel_no_retries(test_ctx: TrezorTestContext) -> Channel:
+    new_channel = Channel.allocate(test_ctx.transport)
+    new_channel.open(credentials=[])
+    new_channel.BUSY_RETRIES = 0
+    return new_channel
+
+
+def _replace_channel_and_do_pairing(
+    test_ctx: TrezorTestContext, channel: Channel
+) -> None:
+    test_ctx.channel = channel
+    test_ctx.client._interact_ctx = test_ctx.client._interact()
+    test_ctx.client.pairing = PairingController(test_ctx.client)
+    test_ctx.client.pairing.skip()
+    test_ctx.client.pairing.finish()
+
+
+# It's possible for this test to fail if CI is very slow. If this happens
+# we should first try marking it with @pytest.mark.flaky(retries=5)
+def test_preemption_busy(test_ctx: TrezorTestContext) -> None:
+    channel_1 = _open_channel_no_retries(test_ctx)
+    channel_2 = _open_channel_no_retries(test_ctx)
+
+    # GetFeatures is in AVOID_RESTARTING_FOR and keeps channel active
+    test_ctx.refresh_features()
+
+    # hopefully less than _PREEMPT_TIMEOUT_MS passed and we get TRANSPORT_BUSY
+    with pytest.raises(ThpError, match="TRANSPORT_BUSY"):
+        _replace_channel_and_do_pairing(test_ctx, channel_1)
+    # channel_1 is desynced now
+
+    time.sleep(1.1)  # _PREEMPT_TIMEOUT_MS + epsilon
+
+    # initial test_ctx.channel is preempted, no TRANSPORT_BUSY is sent
+    _replace_channel_and_do_pairing(test_ctx, channel_2)
+
+
+def test_preemption_wait(test_ctx: TrezorTestContext) -> None:
+    channel_1 = _open_channel_no_retries(test_ctx)
+
+    # GetFeatures is in AVOID_RESTARTING_FOR and keeps channel active
+    test_ctx.refresh_features()
+
+    time.sleep(1.1)  # _PREEMPT_TIMEOUT_MS + epsilon
+
+    # no TRANSPORT_BUSY after _PREEMPT_TIMEOUT_MS
+    _replace_channel_and_do_pairing(test_ctx, channel_1)

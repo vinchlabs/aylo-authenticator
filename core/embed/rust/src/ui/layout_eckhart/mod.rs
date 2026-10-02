@@ -1,0 +1,155 @@
+use theme::backlight;
+
+use super::geometry::Rect;
+use super::CommonUI;
+#[cfg(any(feature = "ui_debug_overlay", feature = "ui_performance_overlay"))]
+use super::{display::Color, geometry::Offset, shape};
+#[cfg(feature = "ui_performance_overlay")]
+use super::{
+    geometry::{Alignment, Alignment2D, Point},
+    PerformanceOverlay,
+};
+#[cfg(feature = "ui_performance_overlay")]
+use crate::strutil::ShortString;
+
+#[cfg(feature = "bootloader")]
+pub mod bootloader;
+pub mod component;
+pub mod constant;
+#[cfg(feature = "micropython")]
+pub mod firmware;
+pub mod theme;
+
+#[cfg(feature = "micropython")]
+pub mod component_msg_obj;
+pub mod cshape;
+#[cfg(feature = "micropython")]
+pub mod flow;
+pub mod fonts;
+
+#[cfg(feature = "bootloader")]
+pub mod ui_bootloader;
+#[cfg(feature = "micropython")]
+pub mod ui_firmware;
+
+#[cfg(feature = "prodtest")]
+mod prodtest;
+
+use component::{ErrorScreen, UpdateScreen, WelcomeScreen};
+
+use crate::ui::layout::simplified::show;
+
+pub const WAIT_FOR_RESTART_MESSAGE: &str = "Wait for Trezor restart";
+pub const WAIT_MESSAGE: &str = "Wait";
+pub const CANCEL_MESSAGE: &str = "Cancel";
+
+pub struct UIEckhart;
+
+impl CommonUI for UIEckhart {
+    #[cfg(feature = "backlight")]
+    fn fadein() {
+        crate::ui::display::fade_backlight_duration(backlight::get_backlight_normal(), 150);
+    }
+
+    #[cfg(feature = "backlight")]
+    fn fadeout() {
+        crate::ui::display::fade_backlight_duration(backlight::get_backlight_dim(), 150);
+    }
+
+    #[cfg(feature = "backlight")]
+    fn backlight_on() {
+        crate::ui::display::set_backlight(backlight::get_backlight_normal());
+    }
+
+    #[cfg(feature = "backlight")]
+    fn get_backlight_none() -> u8 {
+        backlight::get_backlight_none()
+    }
+
+    #[cfg(feature = "backlight")]
+    fn get_backlight_normal() -> u8 {
+        backlight::get_backlight_normal()
+    }
+
+    #[cfg(feature = "backlight")]
+    fn get_backlight_low() -> u8 {
+        backlight::get_backlight_low()
+    }
+
+    #[cfg(feature = "backlight")]
+    fn get_backlight_dim() -> u8 {
+        backlight::get_backlight_dim()
+    }
+
+    #[cfg(feature = "backlight")]
+    fn get_backlight_max() -> u8 {
+        backlight::get_backlight_max()
+    }
+
+    const SCREEN: Rect = constant::SCREEN;
+
+    fn screen_fatal_error(title: &str, msg: &str, footer: &str) {
+        let mut frame = ErrorScreen::new(title.into(), msg.into(), footer.into());
+        show(&mut frame, false);
+    }
+
+    fn screen_boot_stage_2(fade_in: bool) {
+        let mut frame = WelcomeScreen::new();
+        show(&mut frame, fade_in);
+    }
+
+    fn screen_update() {
+        let mut screen = UpdateScreen::new();
+        show(&mut screen, true);
+    }
+
+    #[cfg(feature = "ui_debug_overlay")]
+    fn render_debug_overlay<'s>(target: &mut impl shape::Renderer<'s>) {
+        const RECT_SIZE: i16 = 15;
+        let r = Rect::from_top_left_and_size(
+            Self::SCREEN.top_right() - Offset::new(10 + RECT_SIZE, -10),
+            Offset::new(RECT_SIZE, RECT_SIZE),
+        );
+        shape::Bar::new(r)
+            .with_bg(Color::rgb(0xff, 0, 0))
+            .render(target);
+    }
+
+    #[cfg(feature = "ui_performance_overlay")]
+    fn render_performance_overlay<'s>(
+        target: &mut impl shape::Renderer<'s>,
+        info: PerformanceOverlay,
+    ) {
+        let curve_offset = Offset::new(10, 10);
+        let mut text = ShortString::new();
+        let t1 = info.render_time.min(99999) as u32;
+        let t2 = info.refresh_time.min(99999) as u32;
+        unwrap!(ufmt::uwrite!(
+            text,
+            "{}.{}|{}.{}",
+            t1 / 1000,
+            (t1 % 1000) / 100,
+            t2 / 1000,
+            (t2 % 1000) / 100
+        ));
+        let font = fonts::FONT_SATOSHI_MEDIUM_26;
+        let size = Offset::new(
+            font.visible_text_width("00.0|00.0"),
+            font.visible_text_height("0|"),
+        ) + curve_offset;
+        let pos = Point::new(constant::WIDTH, 0);
+        let r = Rect::snap(pos, size, Alignment2D::TOP_RIGHT);
+        shape::Bar::new(r)
+            .with_alpha(192)
+            .with_bg(Color::black())
+            .render(target);
+        shape::Text::new(
+            r.bottom_right() - Offset::new(curve_offset.x, font.baseline),
+            &text,
+            font,
+        )
+        .with_align(Alignment::End)
+        .with_fg(Color::rgb(255, 255, 0))
+        .render(target);
+    }
+}

@@ -1,0 +1,290 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <trezor_types.h>
+
+#include <sha2.h>
+
+// maximum data size allowed to be sent
+#define NRF_MAX_TX_DATA_SIZE (251)
+
+typedef enum : uint8_t {
+  NRF_SERVICE_BLE = 0,
+  NRF_SERVICE_BLE_MANAGER = 1,
+  NRF_SERVICE_MANAGEMENT = 2,
+  NRF_SERVICE_PRODTEST = 3,
+  NRF_SERVICE_IDLE = 4,
+
+  NRF_SERVICE_CNT  // Number of services
+} nrf_service_id_t;
+
+typedef enum {
+  NRF_STATUS_OK = 0,       // Packet completed successfully
+  NRF_STATUS_TIMEOUT = 1,  // Timeout occurred
+  NRF_STATUS_ERROR = 2,    // General error
+  NRF_STATUS_ABORTED = 3,  // Packet was aborted
+} nrf_status_t;
+
+typedef struct {
+  uint8_t version_major;
+  uint8_t version_minor;
+  uint8_t version_patch;
+  uint8_t version_tweak;
+
+  bool reserved;
+  bool in_stay_in_bootloader;
+  bool reserved2;
+  bool out_wakeup;
+
+  uint8_t hash[SHA256_DIGEST_LENGTH];
+} nrf_info_t;
+
+/** Callback type invoked when data is received on a registered service */
+typedef void (*nrf_rx_callback_t)(const uint8_t *data, uint32_t len);
+
+/** Callback type invoked when a message transmission completes */
+typedef void (*nrf_tx_callback_t)(nrf_status_t status, void *context);
+
+/**
+ * @brief Initialize the NRF driver.
+ */
+void nrf_init(void);
+
+/**
+ * @brief Deinitialize the NRF driver.
+ */
+void nrf_deinit(void);
+
+/**
+ * @brief Suspend the NRF driver.
+ */
+void nrf_suspend(void);
+
+/**
+ * @brief Resume the NRF driver.
+ */
+void nrf_resume(void);
+
+/**
+ * @brief Check if the NRF communication is currently running.
+ *
+ * @return true if running, false otherwise
+ */
+bool nrf_is_running(void);
+
+/**
+ * @brief Register a listener for a specific NRF service.
+ *
+ * The listener callback will be invoked from an interrupt context when a
+ * message is received for the specified service.
+ *
+ * @param service  Service identifier to register for
+ * @param callback Function to call when data arrives
+ * @return false if a listener for the service is already registered, true
+ * otherwise
+ */
+bool nrf_register_listener(nrf_service_id_t service,
+                           nrf_rx_callback_t callback);
+
+/**
+ * @brief Unregister the listener for a specific NRF service.
+ *
+ * @param service  Service identifier to unregister
+ */
+void nrf_unregister_listener(nrf_service_id_t service);
+
+/**
+ * @brief Send a message to a specific NRF service.
+ *
+ * The message will be queued and sent as soon as possible. If the queue is
+ * full, the message will be dropped.
+ *
+ * @param service   Service identifier to send to
+ * @param data      Pointer to the data buffer to send
+ * @param len       Length of the data buffer
+ * @param callback  Function to call upon transmission completion
+ * @param context   Context pointer passed to the callback
+ * @return true if successfully queued; false otherwise
+ */
+bool nrf_send_msg(nrf_service_id_t service, const uint8_t *data, uint32_t len,
+                  nrf_tx_callback_t callback, void *context);
+
+/**
+ * @brief Read version and other information from the NRF application.
+ *
+ * Blocking function that fills the provided nrf_info_t structure.
+ *
+ * @param info  Pointer to an nrf_info_t structure to populate
+ * @return true on success; false on communication error
+ */
+bool nrf_get_info(nrf_info_t *info);
+
+/**
+ * Get application/firmware version of the NRF device.
+ *
+ * @return version number of the NRF device as a 32-bit integer - with major
+ * being MSB. Returns zero in case of failure.
+ */
+uint32_t nrf_get_version(void);
+
+/**
+ * @brief Place the NRF device into system-off (deep sleep) mode.
+ *
+ * @return true if the command was acknowledged; false otherwise
+ */
+bool nrf_system_off(void);
+
+/**
+ * @brief Reboot the NRF device immediately.
+ */
+void nrf_reboot(void);
+
+/**
+ * @brief Send raw UART data to the NRF device (for debugging purposes).
+ *
+ * @param data  Pointer to the data buffer
+ * @param len   Length of the data buffer
+ * @param timeout_ms  Timeout in milliseconds for the operation
+ */
+bool nrf_send_uart_data(const uint8_t *data, uint32_t len, uint32_t timeout_ms);
+
+/**
+ * @brief Check if an nRF device firmware update is required by comparing SHA256
+ * hashes.
+ *
+ * @param image_ptr  Pointer to the firmware image in memory
+ * @param image_len  Length of the firmware image in bytes
+ * @return true if an update is required (e.g., corrupted image detected or hash
+ * mismatch), false if the device already has the same firmware version
+ */
+bool nrf_update_required(const uint8_t *image_ptr, size_t image_len);
+
+/**
+ * @brief Perform a firmware update on the nRF device via DFU (Device Firmware
+ * Update).
+ *
+ * @param image_ptr  Pointer to the firmware image in memory
+ * @param image_len  Length of the firmware image in bytes
+ * @return true always (indicates that the update process was initiated)
+ */
+bool nrf_update(const uint8_t *image_ptr, size_t image_len);
+
+/**
+ * @brief Per-chunk progress callback for the nRF SMP upload.
+ *
+ * Reports an absolute position: `done` of `total` bytes transferred. See
+ * nrf_update_with_progress for why the sequence may step backwards.
+ */
+typedef void (*nrf_progress_callback_t)(uint32_t done, uint32_t total);
+
+/**
+ * @brief Like nrf_update, but reports SMP-upload progress via `progress`.
+ * For direct (non-syscall) callers such as the bootloader OTA workflow, which
+ * drive a progress bar during the push.
+ *
+ * `done` is NOT monotonic across the internal retries: a failed attempt is
+ * restarted from offset 0, so the next report drops back to one chunk. That is
+ * deliberate -- the upload really did start over, and a bar that visibly
+ * restarts is truthful where a stalled one would not be. Treat each
+ * (done, total) as an absolute position and render it as such; do NOT
+ * accumulate deltas or assume the sequence only rises.
+ *
+ * @param image_ptr  Pointer to the firmware image in memory
+ * @param image_len  Length of the firmware image in bytes
+ * @param progress   May be NULL; NOT usable across the kernel/user syscall
+ *                   boundary -- see nrf_update.
+ * @return true if the update process was initiated
+ */
+bool nrf_update_with_progress(const uint8_t *image_ptr, size_t image_len,
+                              nrf_progress_callback_t progress);
+
+/**
+ * @brief Authenticate pairing of nRF chip with Trezor
+ *
+ * @return true if nrf chip is properly paired
+ */
+bool nrf_authenticate(void);
+
+///////////////////////////////////////////////////////////////////////////////
+// TEST-only functions
+
+/**
+ * @brief Test SPI communication with the NRF device.
+ *
+ * @return true if SPI communication succeeds; false otherwise
+ */
+bool nrf_test_spi_comm(void);
+
+/**
+ * @brief Test UART communication with the NRF device.
+ *
+ * @return true if UART communication succeeds; false otherwise
+ */
+bool nrf_test_uart_comm(void);
+
+/**
+ * @brief Test the NRF reset pin functionality.
+ *
+ * @return true if reset behavior is correct; false otherwise
+ */
+bool nrf_test_reset(void);
+
+/**
+ * @brief Test the GPIO pin that forces the device to stay in bootloader.
+ *
+ * @return true if the GPIO behaves correctly; false otherwise
+ */
+bool nrf_test_gpio_stay_in_bld(void);
+
+/**
+ * @brief Test a reserved GPIO pin on the NRF device.
+ *
+ * @return true if the GPIO behavior is correct; false otherwise
+ */
+bool nrf_test_gpio_reserved(void);
+
+/**
+ * @brief Pair the NRF MCU with Trezor.
+ *
+ * @return true if pairing is successful; false otherwise
+ */
+bool nrf_test_pair(void);
+
+/**
+ * @brief Set the Direct Test Mode (DTM) on the NRF device.
+ *
+ * @param set       true to enable DTM mode, false to disable
+ * @param callback  Function to call with received bytes in DTM mode
+ */
+void nrf_set_dtm_mode(bool set, void (*callback)(uint8_t byte));
+
+/**
+ * @brief Send data in Direct Test Mode (DTM) on the NRF device.
+ *
+ * This function sends raw data bytes in DTM mode. It is only valid when DTM
+ * mode is enabled.
+ *
+ * @param data  Pointer to the data buffer to send
+ * @param len   Length of the data buffer
+ */
+void nrf_dtm_send_data(const uint8_t *data, uint32_t len);
+
+///////////////////////////////////////////////////////////////////////////////

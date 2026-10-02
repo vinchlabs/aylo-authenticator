@@ -1,0 +1,603 @@
+use rtl::CSlice;
+use rtl::error::ensure;
+use zeroize::Zeroize;
+
+use super::secret::{SecretContext, SecretContextLock, ZeroableMemory};
+use super::{Error, consteq, ffi};
+
+// Tag size is a parameter but we fix it to 16 here for simplicity.
+pub const TAG_SIZE: usize = 16;
+pub type Tag = [u8; TAG_SIZE];
+
+// for bindgen RETURN_* macros are u32, just redefine the only one we are using
+const RETURN_GOOD: i32 = 0;
+const KEY_SIZES: [usize; 3] = [16, 24, 32];
+
+#[repr(u8)]
+#[derive(PartialEq)]
+enum State {
+    Init,
+    Processing,
+    Finished,
+    Failed,
+}
+
+// SAFETY: gcm_ctx is valid when zeroed
+unsafe impl ZeroableMemory for ffi::gcm_ctx {}
+
+pub type AesGcmContext = SecretContext<ffi::gcm_ctx>;
+
+struct AesGcmInner<'a> {
+    ctx: SecretContextLock<&'a mut AesGcmContext>,
+    state: State,
+}
+
+pub struct AesGcmEncrypt<'a>(AesGcmInner<'a>);
+pub struct AesGcmDecrypt<'a>(AesGcmInner<'a>);
+
+impl<'a> AesGcmInner<'a> {
+    /// Construct a new AES-GCM context.
+    fn new(ctx: &'a mut AesGcmContext, key: &[u8], iv: &[u8]) -> Result<Self, Error> {
+        if !KEY_SIZES.contains(&key.len()) {
+            return Err(Error::InvalidParams);
+        }
+
+        let key_ptr = CSlice::from(key);
+
+        // initialize the context
+        // SAFETY: ffi
+        // COPY HAZARD: this call operates on ctx in-place
+        let res = unsafe {
+            ffi::gcm_init_and_key(
+                key_ptr.ptr(),
+                key_ptr.len() as cty::c_ulong,
+                ctx.hazard_mut(),
+            )
+        };
+        ensure!(res == RETURN_GOOD, "gcm_init_and_key");
+        let mut aesgcm = Self {
+            ctx: SecretContextLock::new(ctx),
+            state: State::Init,
+        };
+        aesgcm.reset(iv);
+        Ok(aesgcm)
+    }
+
+    fn reset(&mut self, iv: &[u8]) {
+        let iv_ptr = CSlice::from(iv);
+        // SAFETY: ffi
+        // COPY HAZARD: this call operates on ctx in-place
+        let res = unsafe {
+            ffi::gcm_init_message(
+                iv_ptr.ptr(),
+                iv_ptr.len() as cty::c_ulong,
+                self.ctx.hazard_mut(),
+            )
+        };
+        ensure!(res == RETURN_GOOD, "gcm_init_message");
+        self.state = State::Init;
+    }
+
+    fn auth(&mut self, data: &[u8]) -> Result<(), Error> {
+        self.check_state(&[State::Init, State::Processing])?;
+
+        let data_ptr = CSlice::from(data);
+        // SAFETY: ffi
+        // COPY HAZARD: this call operates on ctx in-place
+        let res = unsafe {
+            ffi::gcm_auth_header(
+                data_ptr.ptr(),
+                data_ptr.len() as cty::c_ulong,
+                self.ctx.hazard_mut(),
+            )
+        };
+        ensure!(res == RETURN_GOOD, "gcm_auth_header");
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<Tag, Error> {
+        self.check_state(&[State::Init, State::Processing])?;
+        self.state = State::Finished;
+
+        let mut tag = [0u8; TAG_SIZE];
+        // SAFETY: ffi
+        // COPY HAZARD: this call operates on ctx in-place
+        let res = unsafe {
+            ffi::gcm_compute_tag(
+                tag.as_mut_ptr(),
+                tag.len() as cty::c_ulong,
+                self.ctx.hazard_mut(),
+            )
+        };
+        if res != RETURN_GOOD {
+            self.state = State::Failed;
+            return Err(Error::InvalidContext);
+        }
+        Ok(tag)
+    }
+
+    fn check_state(&self, allowed: &[State]) -> Result<(), Error> {
+        if !allowed.contains(&self.state) {
+            return Err(Error::InvalidContext);
+        }
+        Ok(())
+    }
+}
+
+impl<'a> AesGcmEncrypt<'a> {
+    pub fn new(ctx: &'a mut AesGcmContext, key: &[u8], iv: &[u8]) -> Result<Self, Error> {
+        Ok(Self(AesGcmInner::new(ctx, key, iv)?))
+    }
+
+    pub fn reset(&mut self, iv: &[u8]) {
+        self.0.reset(iv)
+    }
+
+    pub fn auth(&mut self, data: &[u8]) -> Result<(), Error> {
+        self.0.auth(data)
+    }
+
+    pub fn encrypt<'b>(
+        &mut self,
+        plaintext: &[u8],
+        buffer: &'b mut [u8],
+    ) -> Result<&'b [u8], Error> {
+        let buffer = buffer
+            .get_mut(..plaintext.len())
+            .ok_or(Error::InvalidParams)?;
+        buffer.copy_from_slice(plaintext);
+        match self.encrypt_in_place(buffer) {
+            Err(e) => {
+                buffer.zeroize(); // wipe plaintext from buffer on failure
+                Err(e)
+            }
+            _ => Ok(buffer),
+        }
+    }
+
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        self.0.check_state(&[State::Init, State::Processing])?;
+        self.0.state = State::Processing;
+
+        // SAFETY: ffi
+        // COPY HAZARD: this call operates on ctx in-place
+        let res = unsafe {
+            ffi::gcm_encrypt(
+                data.as_mut_ptr(),
+                data.len() as cty::c_ulong,
+                self.0.ctx.hazard_mut(),
+            )
+        };
+        ensure!(res == RETURN_GOOD, "gcm_encrypt");
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> Result<Tag, Error> {
+        self.0.finish()
+    }
+}
+
+impl<'a> AesGcmDecrypt<'a> {
+    pub fn new(ctx: &'a mut AesGcmContext, key: &[u8], iv: &[u8]) -> Result<Self, Error> {
+        Ok(Self(AesGcmInner::new(ctx, key, iv)?))
+    }
+
+    pub fn reset(&mut self, iv: &[u8]) {
+        self.0.reset(iv)
+    }
+
+    pub fn auth(&mut self, data: &[u8]) -> Result<(), Error> {
+        self.0.auth(data)
+    }
+
+    pub fn decrypt<'b>(
+        &mut self,
+        ciphertext: &[u8],
+        buffer: &'b mut [u8],
+    ) -> Result<&'b [u8], Error> {
+        let buffer = buffer
+            .get_mut(..ciphertext.len())
+            .ok_or(Error::InvalidParams)?;
+        buffer.copy_from_slice(ciphertext);
+        self.decrypt_in_place(buffer)?;
+        Ok(buffer)
+    }
+
+    pub fn decrypt_in_place(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        self.0.check_state(&[State::Init, State::Processing])?;
+        self.0.state = State::Processing;
+
+        // SAFETY: ffi
+        // COPY HAZARD: this call operates on ctx in-place
+        let res = unsafe {
+            ffi::gcm_decrypt(
+                data.as_mut_ptr(),
+                data.len() as cty::c_ulong,
+                self.0.ctx.hazard_mut(),
+            )
+        };
+        ensure!(res == RETURN_GOOD, "gcm_decrypt");
+        Ok(())
+    }
+
+    pub fn finish(&mut self, expected_tag: &Tag) -> Result<(), Error> {
+        let computed_tag = self.0.finish()?;
+        if !consteq(&computed_tag, expected_tag) {
+            return Err(Error::AuthenticationFailed);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    struct Vector {
+        key: &'static str,
+        iv: &'static str,
+        aad: &'static str,
+        plaintext: &'static str,
+        ciphertext: &'static str,
+        tag: &'static str,
+    }
+
+    impl Vector {
+        fn decoded(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Tag) {
+            let key = hex::decode(self.key).unwrap();
+            let iv = hex::decode(self.iv).unwrap();
+            let aad = hex::decode(self.aad).unwrap();
+            let pt = hex::decode(self.plaintext).unwrap();
+            let ct = hex::decode(self.ciphertext).unwrap();
+            let tag = hex::decode(self.tag).unwrap();
+            (key, iv, aad, pt, ct, Tag::try_from(tag).unwrap())
+        }
+    }
+
+    const AES_GCM_VECTORS: &[Vector] = &[
+        // first 10 vectors from https://github.com/BrianGladman/modes/blob/master/testvals/gcm.1
+        Vector {
+            key: "00000000000000000000000000000000",
+            iv: "000000000000000000000000",
+            aad: "",
+            plaintext: "",
+            ciphertext: "",
+            tag: "58e2fccefa7e3061367f1d57a4e7455a",
+        },
+        Vector {
+            key: "00000000000000000000000000000000",
+            iv: "000000000000000000000000",
+            aad: "",
+            plaintext: "00000000000000000000000000000000",
+            ciphertext: "0388dace60b6a392f328c2b971b2fe78",
+            tag: "ab6e47d42cec13bdf53a67b21257bddf",
+        },
+        Vector {
+            key: "feffe9928665731c6d6a8f9467308308",
+            iv: "cafebabefacedbaddecaf888",
+            aad: "",
+            plaintext: "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255",
+            ciphertext: "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985",
+            tag: "4d5c2af327cd64a62cf35abd2ba6fab4",
+        },
+        Vector {
+            key: "feffe9928665731c6d6a8f9467308308",
+            iv: "cafebabefacedbaddecaf888",
+            aad: "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+            plaintext: "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+            ciphertext: "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091",
+            tag: "5bc94fbc3221a5db94fae95ae7121a47",
+        },
+        Vector {
+            key: "feffe9928665731c6d6a8f9467308308",
+            iv: "cafebabefacedbad",
+            aad: "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+            plaintext: "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+            ciphertext: "61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c742373806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f4598",
+            tag: "3612d2e79e3b0785561be14aaca2fccb",
+        },
+        Vector {
+            key: "feffe9928665731c6d6a8f9467308308",
+            iv: "9313225df88406e555909c5aff5269aa6a7a9538534f7da1e4c303d2a318a728c3c0c95156809539fcf0e2429a6b525416aedbf5a0de6a57a637b39b",
+            aad: "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+            plaintext: "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+            ciphertext: "8ce24998625615b603a033aca13fb894be9112a5c3a211a8ba262a3cca7e2ca701e4a9a4fba43c90ccdcb281d48c7c6fd62875d2aca417034c34aee5",
+            tag: "619cc5aefffe0bfa462af43c1699d050",
+        },
+        Vector {
+            key: "000000000000000000000000000000000000000000000000",
+            iv: "000000000000000000000000",
+            aad: "",
+            plaintext: "",
+            ciphertext: "",
+            tag: "cd33b28ac773f74ba00ed1f312572435",
+        },
+        Vector {
+            key: "000000000000000000000000000000000000000000000000",
+            iv: "000000000000000000000000",
+            aad: "",
+            plaintext: "00000000000000000000000000000000",
+            ciphertext: "98e7247c07f0fe411c267e4384b0f600",
+            tag: "2ff58d80033927ab8ef4d4587514f0fb",
+        },
+        Vector {
+            key: "feffe9928665731c6d6a8f9467308308feffe9928665731c",
+            iv: "cafebabefacedbaddecaf888",
+            aad: "",
+            plaintext: "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255",
+            ciphertext: "3980ca0b3c00e841eb06fac4872a2757859e1ceaa6efd984628593b40ca1e19c7d773d00c144c525ac619d18c84a3f4718e2448b2fe324d9ccda2710acade256",
+            tag: "9924a7c8587336bfb118024db8674a14",
+        },
+        Vector {
+            key: "feffe9928665731c6d6a8f9467308308feffe9928665731c",
+            iv: "cafebabefacedbaddecaf888",
+            aad: "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+            plaintext: "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+            ciphertext: "3980ca0b3c00e841eb06fac4872a2757859e1ceaa6efd984628593b40ca1e19c7d773d00c144c525ac619d18c84a3f4718e2448b2fe324d9ccda2710",
+            tag: "2519498e80f1478f37ba55bd6d27618c",
+        },
+        // test vectors from test_trezor.wire.thp.crypto.py
+        Vector {
+            key: "0001020304050607000102030405060700010203040506070001020304050607",
+            iv: "000000000000000000000000",
+            aad: "5564",
+            plaintext: "00010203040506070809",
+            ciphertext: "e2c9dd152fbee5821ea7",
+            tag: "10625812de81b14a46b9f1e5100a6d0c",
+        },
+        Vector {
+            key: "0001020304050607000102030405060700010203040506070001020304050607",
+            iv: "000000000000000000000001",
+            aad: "5564",
+            plaintext: "00010203040506070809",
+            ciphertext: "79811619ddb07c2b99f8",
+            tag: "71c6b872cdc499a7e9a3c7441f053214",
+        },
+        Vector {
+            key: "0001020304050607000102030405060700010203040506070001020304050607",
+            iv: "000000000000000000000171",
+            aad: "5564",
+            plaintext: "000102030405060708090a0b0c0d0e0f",
+            ciphertext: "03bd030390f2dfe815a61c2b157a064f",
+            tag: "c1200f8a7ae9a6d32cef0fff878d55c2",
+        },
+        Vector {
+            key: "0001020304050607000102030405060700010203040506070001020304050607",
+            iv: "000000000000000000000171",
+            aad: "5564738291",
+            plaintext: "000102030405060708090a0b0c0d0e0f",
+            ciphertext: "03bd030390f2dfe815a61c2b157a064f",
+            tag: "693ac160cd93a20f7fc255f049d808d0",
+        },
+    ];
+
+    #[test]
+    fn test_vectors() {
+        for v in AES_GCM_VECTORS {
+            let (key, iv, aad, plaintext, ciphertext, tag) = v.decoded();
+
+            let mut ctx_enc = AesGcmContext::default();
+            let mut ctx_enc = AesGcmEncrypt::new(&mut ctx_enc, &key, &iv).unwrap();
+            let mut ctx_dec = AesGcmContext::default();
+            let mut ctx_dec = AesGcmDecrypt::new(&mut ctx_dec, &key, &iv).unwrap();
+
+            if !plaintext.is_empty() {
+                let mut buffer = vec![0; plaintext.len()];
+                let result = ctx_enc.encrypt(&plaintext, &mut buffer).unwrap();
+                assert_eq!(hex::encode(result), v.ciphertext);
+
+                let result = ctx_dec.decrypt(&ciphertext, &mut buffer).unwrap();
+                assert_eq!(hex::encode(result), v.plaintext);
+            }
+
+            if !aad.is_empty() {
+                ctx_enc.auth(&aad).unwrap();
+                ctx_dec.auth(&aad).unwrap();
+            }
+
+            let result = ctx_enc.finish().unwrap();
+            assert_eq!(hex::encode(result), v.tag);
+            ctx_dec.finish(&tag).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_state() {
+        // ok: empty string tag - encryption
+        let mut ctx_enc = AesGcmContext::default();
+        let mut ctx_enc = AesGcmEncrypt::new(&mut ctx_enc, &[0u8; 16], b"1").unwrap();
+        let tag_empty = ctx_enc.finish().unwrap();
+
+        // ok: empty string tag - decryption
+        let mut ctx_dec = AesGcmContext::default();
+        let mut ctx_dec = AesGcmDecrypt::new(&mut ctx_dec, &[0u8; 16], b"1").unwrap();
+        ctx_dec.finish(&tag_empty).unwrap();
+
+        // ok: any single operation
+        // not ok: after reset
+        let mut dest = [0u8; 4];
+        let mut dest2 = [0u8; 16];
+        ctx_enc.reset(b"2");
+        ctx_enc.encrypt(b"asdf", &mut dest).unwrap();
+        let tag2 = ctx_enc.finish().unwrap();
+        assert!(ctx_enc.encrypt(b"asdf", &mut dest2).is_err());
+
+        ctx_dec.reset(b"2");
+        ctx_dec.decrypt(&dest, &mut dest2).unwrap();
+        ctx_dec.finish(&tag2).unwrap();
+        assert!(ctx_dec.decrypt(b"fdsa", &mut dest).is_err());
+
+        ctx_enc.reset(b"5");
+        ctx_enc.auth(b"foobar").unwrap();
+        let tag5 = ctx_enc.finish().unwrap();
+        assert!(ctx_enc.auth(b"foobar").is_err());
+
+        ctx_dec.reset(b"5");
+        ctx_dec.auth(b"foobar").unwrap();
+        ctx_dec.finish(&tag5).unwrap();
+        assert!(ctx_dec.auth(b"foobar").is_err());
+    }
+
+    // test vectors from
+    // https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/gcmtestvectors.zip
+    const NIST_VECTORS: &[Vector] = &[
+        Vector {
+            key: "11754cd72aec309bf52f7687212e8957",
+            iv: "3c819d9a9bed087615030b65",
+            plaintext: "",
+            aad: "",
+            ciphertext: "",
+            tag: "250327c674aaf477aef2675748cf6971",
+        },
+        Vector {
+            key: "fe9bb47deb3a61e423c2231841cfd1fb",
+            iv: "4d328eb776f500a2f7fb47aa",
+            plaintext: "f1cc3818e421876bb6b8bbd6c9",
+            aad: "",
+            ciphertext: "b88c5c1977b35b517b0aeae967",
+            tag: "43fd4727fe5cdb4b5b42818dea7ef8c9",
+        },
+        Vector {
+            key: "6f44f52c2f62dae4e8684bd2bc7d16ee7c557330305a790d",
+            iv: "9ae35825d7c7edc9a39a0732",
+            plaintext: "37222d30895eb95884bbbbaee4d9cae1",
+            aad: "1b4236b846fc2a0f782881ba48a067e9",
+            ciphertext: "a54b5da33fc1196a8ef31a5321bfcaeb",
+            tag: "1c198086450ae1834dd6c2636796bce2",
+        },
+        Vector {
+            key: "05f714021372ae1c8d72c98e6307fbddb26ee27615860a9fb48ba4c3ea360a00",
+            iv: "c0",
+            plaintext: "ec3afbaa1447e47ce068bffb787bd0cadc9f0deceb11fa78e981271390578ae95891f26664b5e62d1fd5fd0d0767a54da5f86f",
+            aad: "faf9fa457a8e70ea709da28545f18f041351e8d5",
+            ciphertext: "c8c5816ba9e7e0d20820dc0064a519a277889f5ac9661c9882b5a9896fd12836c6721514e885b1d34f5e888d1d85abce8c2ebb",
+            tag: "0856f211fade7d26d64478ca46025a3c",
+        },
+    ];
+
+    // following tests ported from test_trezor.crypto.aesgcm.py
+    #[test]
+    fn test_gcm() {
+        for v in NIST_VECTORS {
+            let (key, iv, aad, pt, ct, tag) = v.decoded();
+
+            // Test encryption.
+            let mut ctx = AesGcmContext::default();
+            let mut ctx = AesGcmEncrypt::new(&mut ctx, &key, &iv).unwrap();
+            if !aad.is_empty() {
+                ctx.auth(&aad).unwrap();
+            }
+            let mut buffer = vec![0; pt.len()];
+            let result = ctx.encrypt(&pt, &mut buffer).unwrap();
+            assert_eq!(hex::encode(result), v.ciphertext);
+
+            let result = ctx.finish().unwrap();
+            assert_eq!(hex::encode(result), v.tag);
+
+            // Test decryption.
+            let mut ctx = AesGcmContext::default();
+            let mut ctx = AesGcmDecrypt::new(&mut ctx, &key, &iv).unwrap();
+            if !aad.is_empty() {
+                ctx.auth(&aad).unwrap();
+            }
+            let result = ctx.decrypt(&ct, &mut buffer).unwrap();
+            assert_eq!(hex::encode(result), v.plaintext);
+
+            ctx.finish(&tag).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_gcm_in_place() {
+        for v in NIST_VECTORS {
+            let (key, iv, aad, pt, ct, tag) = v.decoded();
+
+            // Test encryption.
+            let mut ctx = AesGcmContext::default();
+            let mut ctx = AesGcmEncrypt::new(&mut ctx, &key, &iv).unwrap();
+            if !aad.is_empty() {
+                ctx.auth(&aad).unwrap();
+            }
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&pt);
+            ctx.encrypt_in_place(&mut buffer).unwrap();
+            assert_eq!(hex::encode(buffer), v.ciphertext);
+
+            let result = ctx.finish().unwrap();
+            assert_eq!(hex::encode(result), v.tag);
+
+            // Test decryption.
+            let mut ctx = AesGcmContext::default();
+            let mut ctx = AesGcmDecrypt::new(&mut ctx, &key, &iv).unwrap();
+            if !aad.is_empty() {
+                ctx.auth(&aad).unwrap();
+            }
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&ct);
+            ctx.decrypt_in_place(&mut buffer).unwrap();
+            assert_eq!(hex::encode(buffer), v.plaintext);
+
+            ctx.finish(&tag).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_gcm_chunks() {
+        for v in NIST_VECTORS {
+            let (key, iv, aad, pt, ct, tag) = v.decoded();
+            let chunk_len = pt.len() / 3;
+            let mut buffer = vec![0; pt.len()];
+
+            let mut ctx = AesGcmContext::default();
+            let mut ctx = AesGcmDecrypt::new(&mut ctx, &key, &iv).unwrap();
+            ctx.decrypt(&ct[..chunk_len], &mut buffer[..chunk_len])
+                .unwrap();
+            ctx.auth(aad.get(..7).unwrap_or(&[])).unwrap();
+            ctx.decrypt(&ct[chunk_len..], &mut buffer[chunk_len..])
+                .unwrap();
+            ctx.auth(aad.get(7..).unwrap_or(&[])).unwrap();
+            assert_eq!(hex::encode(buffer), v.plaintext);
+            ctx.finish(&tag).unwrap();
+
+            buffer = vec![0; pt.len()];
+            let mut ctx = AesGcmContext::default();
+            let mut ctx = AesGcmEncrypt::new(&mut ctx, &key, &iv).unwrap();
+            ctx.auth(aad.get(..7).unwrap_or(&[])).unwrap();
+            ctx.encrypt(&pt[..chunk_len], &mut buffer[..chunk_len])
+                .unwrap();
+            ctx.auth(aad.get(7..).unwrap_or(&[])).unwrap();
+            ctx.encrypt(&pt[chunk_len..], &mut buffer[chunk_len..])
+                .unwrap();
+            assert_eq!(hex::encode(buffer), v.ciphertext);
+            assert_eq!(hex::encode(ctx.finish().unwrap()), v.tag);
+        }
+    }
+
+    #[test]
+    fn test_gcm_chunks_in_place() {
+        for v in NIST_VECTORS {
+            let (key, iv, aad, pt, ct, tag) = v.decoded();
+            let chunk_len = pt.len() / 3;
+
+            let mut buffer = ct;
+            let mut ctx = AesGcmContext::default();
+            let mut ctx = AesGcmDecrypt::new(&mut ctx, &key, &iv).unwrap();
+            ctx.decrypt_in_place(&mut buffer[..chunk_len]).unwrap();
+            ctx.auth(aad.get(..7).unwrap_or(&[])).unwrap();
+            ctx.decrypt_in_place(&mut buffer[chunk_len..]).unwrap();
+            ctx.auth(aad.get(7..).unwrap_or(&[])).unwrap();
+            assert_eq!(hex::encode(buffer), v.plaintext);
+            ctx.finish(&tag).unwrap();
+
+            let mut buffer = pt;
+            let mut ctx = AesGcmContext::default();
+            let mut ctx = AesGcmEncrypt::new(&mut ctx, &key, &iv).unwrap();
+            ctx.auth(aad.get(..7).unwrap_or(&[])).unwrap();
+            ctx.encrypt_in_place(&mut buffer[..chunk_len]).unwrap();
+            ctx.auth(aad.get(7..).unwrap_or(&[])).unwrap();
+            ctx.encrypt_in_place(&mut buffer[chunk_len..]).unwrap();
+            assert_eq!(hex::encode(buffer), v.ciphertext);
+            assert_eq!(hex::encode(ctx.finish().unwrap()), v.tag);
+        }
+    }
+}

@@ -1,0 +1,395 @@
+from typing import TYPE_CHECKING
+
+from trezor.crypto import base58
+from trezor.wire import ProcessError
+
+from .transaction import Transaction
+from .transaction.instructions import (
+    _STAKE_PROGRAM_ID,
+    _SYSTEM_PROGRAM_ID,
+    AssociatedTokenAccountProgramCreateInstruction,
+    Instruction,
+    SystemProgramTransferInstruction,
+    Token2022ProgramTransferCheckedInstruction,
+    TokenProgramTransferCheckedInstruction,
+)
+from .types import is_address_reference
+
+if TYPE_CHECKING:
+    from trezor.messages import PaymentRequest
+
+    from .transaction import Fee
+    from .types import AdditionalTxInfo
+
+    TransferTokenInstruction = (
+        TokenProgramTransferCheckedInstruction
+        | Token2022ProgramTransferCheckedInstruction
+    )
+
+
+def get_native_transfer_instructions(
+    instructions: list[Instruction],
+) -> list[SystemProgramTransferInstruction]:
+    return [
+        instruction
+        for instruction in instructions
+        if SystemProgramTransferInstruction.is_type_of(instruction)
+    ]
+
+
+def get_token_transfer_instructions(
+    instructions: list[Instruction],
+) -> list[TransferTokenInstruction]:
+    return [
+        instruction
+        for instruction in instructions
+        if TokenProgramTransferCheckedInstruction.is_type_of(instruction)
+        or Token2022ProgramTransferCheckedInstruction.is_type_of(instruction)
+    ]
+
+
+def get_create_associated_token_account_instructions(
+    instructions: list[Instruction],
+) -> list[AssociatedTokenAccountProgramCreateInstruction]:
+    return [
+        instruction
+        for instruction in instructions
+        if AssociatedTokenAccountProgramCreateInstruction.is_type_of(instruction)
+    ]
+
+
+def is_predefined_token_transfer(
+    instructions: list[Instruction],
+) -> bool:
+    """
+    Checks that the transaction consists of one or zero create token account instructions
+    and one or more transfer token instructions. Also checks that the token program, token mint
+    and destination in the instructions are the same. I.e. valid instructions can be:
+
+    [transfer]
+    [transfer, *transfer]
+    [create account, transfer]
+    [create account, transfer, *transfer]
+    """
+    create_token_account_instructions = (
+        get_create_associated_token_account_instructions(instructions)
+    )
+    transfer_token_instructions = get_token_transfer_instructions(instructions)
+
+    if len(create_token_account_instructions) + len(transfer_token_instructions) != len(
+        instructions
+    ):
+        # there are also other instructions
+        return False
+
+    if len(create_token_account_instructions) > 1:
+        # there is more than one create token account instruction
+        return False
+
+    if (
+        len(create_token_account_instructions) == 1
+        and instructions[0] != create_token_account_instructions[0]
+    ):
+        # create account instruction has to be the first instruction
+        return False
+
+    if len(transfer_token_instructions) == 0:
+        # there are no transfer token instructions
+        return False
+
+    token_program = transfer_token_instructions[0].program_id
+    token_mint = transfer_token_instructions[0].token_mint[0]
+    token_account = transfer_token_instructions[0].destination_account[0]
+    owner = transfer_token_instructions[0].owner[0]
+
+    for transfer_token_instruction in transfer_token_instructions:
+        if any(
+            map(
+                is_address_reference,
+                (
+                    transfer_token_instruction.token_mint,
+                    transfer_token_instruction.destination_account,
+                    transfer_token_instruction.owner,
+                ),
+            )
+        ):
+            # ALT-referenced accounts can't be resolved on-device, fall back
+            # to the generic reference-aware display instead of showing the
+            # lookup table address as the actual account.
+            return False
+        if (
+            transfer_token_instruction.program_id != token_program
+            or transfer_token_instruction.token_mint[0] != token_mint
+            or transfer_token_instruction.destination_account[0] != token_account
+            or transfer_token_instruction.owner[0] != owner
+        ):
+            # there are different token accounts, don't handle as predefined
+            return False
+
+    # at this point there can only be zero or one create token account instructions
+    create_token_account_instruction = (
+        create_token_account_instructions[0]
+        if len(create_token_account_instructions) == 1
+        else None
+    )
+
+    if create_token_account_instruction is not None and (
+        create_token_account_instruction.spl_token[0] != base58.decode(token_program)
+        or create_token_account_instruction.token_mint[0] != token_mint
+        or create_token_account_instruction.associated_token_account[0] != token_account
+    ):
+        # there are different token accounts, don't handle as predefined
+        return False
+
+    return True
+
+
+async def try_confirm_token_transfer_transaction(
+    transaction: Transaction,
+    fee: Fee,
+    signer_path: list[int],
+    blockhash: bytes,
+    additional_info: AdditionalTxInfo,
+    verified_payment_request: PaymentRequest | None,
+    chunkify: bool,
+) -> bool:
+    from .definitions import unknown_token
+    from .layout import confirm_payment_request, confirm_token_transfer
+    from .token_account import try_get_token_account_base_address
+
+    visible_instructions = transaction.get_visible_instructions()
+    if not is_predefined_token_transfer(
+        visible_instructions,
+    ):
+        return False
+
+    transfer_token_instructions = get_token_transfer_instructions(visible_instructions)
+
+    # in is_predefined_token_transfer we made sure that these values are the same
+    # for all the transfer token instructions
+    token_program = base58.decode(transfer_token_instructions[0].program_id)
+    token_mint = transfer_token_instructions[0].token_mint[0]
+    token_account = transfer_token_instructions[0].destination_account[0]
+
+    base_address = try_get_token_account_base_address(
+        token_account,
+        token_program,
+        token_mint,
+        additional_info.token_accounts_infos,
+    )
+
+    total_token_amount = sum(
+        [
+            transfer_token_instruction.amount
+            for transfer_token_instruction in transfer_token_instructions
+        ]
+    )
+
+    token = additional_info.definitions.get_token(token_mint)
+    is_unknown = token is None
+    if is_unknown:
+        token = unknown_token(token_mint)
+
+    if verified_payment_request:
+        if len(transfer_token_instructions) > 1:
+            raise ProcessError("Multiple transfers not supported for payment requests")
+        provider_address = base58.encode(token_account)
+        await confirm_payment_request(
+            provider_address,
+            signer_path,
+            total_token_amount,
+            transfer_token_instructions[0].decimals,
+            token.symbol,
+            fee,
+            verified_payment_request,
+        )
+    else:
+        await confirm_token_transfer(
+            token_account if base_address is None else base_address,
+            token_account,
+            token,
+            is_unknown,
+            total_token_amount,
+            transfer_token_instructions[0].decimals,
+            fee,
+            blockhash,
+            chunkify,
+        )
+    return True
+
+
+async def try_confirm_predefined_transaction(
+    transaction: Transaction,
+    fee: Fee | None,
+    signer_path: list[int],
+    signer_public_key: bytes,
+    blockhash: bytes,
+    additional_info: AdditionalTxInfo,
+    verified_payment_request: PaymentRequest | None,
+    chunkify: bool,
+) -> bool:
+    from .layout import confirm_system_transfer
+    from .transaction.instructions import SystemProgramTransferInstruction
+
+    if fee is None:
+        # fee must be known for predefined transaction types
+        return False
+
+    instructions = transaction.get_visible_instructions()
+    instructions_count = len(instructions)
+
+    for instruction in instructions:
+        if instruction.multisig_signers:
+            return False
+
+    if instructions_count == 1:
+        if SystemProgramTransferInstruction.is_type_of(instructions[0]):
+            await confirm_system_transfer(
+                instructions[0],
+                fee,
+                signer_path,
+                blockhash,
+                verified_payment_request,
+                chunkify,
+            )
+            return True
+
+    if await try_confirm_staking_transaction(
+        transaction,
+        fee,
+        signer_path,
+        signer_public_key,
+        blockhash,
+        chunkify,
+    ):
+        return True
+
+    return await try_confirm_token_transfer_transaction(
+        transaction,
+        fee,
+        signer_path,
+        blockhash,
+        additional_info,
+        verified_payment_request,
+        chunkify,
+    )
+
+
+async def try_confirm_staking_transaction(
+    transaction: Transaction,
+    fee: Fee,
+    signer_path: list[int],
+    signer_public_key: bytes,
+    blockhash: bytes,
+    chunkify: bool,
+) -> bool:
+    from .transaction.instructions import (
+        StakeProgramDeactivateInstruction,
+        StakeProgramDelegateStakeInstruction,
+        StakeProgramInitializeInstruction,
+        StakeProgramWithdrawInstruction,
+        SystemProgramCreateAccountWithSeedInstruction,
+    )
+
+    instructions = transaction.get_visible_instructions()
+    if not instructions:
+        return False
+
+    def _match_instructions(*expected_types: type[Instruction]) -> bool:
+        if len(instructions) != len(expected_types):
+            return False
+        return all(
+            expected_type.is_type_of(instruction)
+            for instruction, expected_type in zip(instructions, expected_types)
+        )
+
+    if _match_instructions(
+        SystemProgramCreateAccountWithSeedInstruction,
+        StakeProgramInitializeInstruction,
+        StakeProgramDelegateStakeInstruction,
+    ):
+        from .layout import confirm_stake_transaction, confirm_stake_withdrawer
+
+        create, init, delegate = instructions
+        if base58.encode(create.owner) != _STAKE_PROGRAM_ID:
+            return False
+
+        if signer_public_key != create.funding_account[0]:
+            return False
+        if signer_public_key != create.base:
+            return False
+        if signer_public_key != init.staker:
+            return False
+        if signer_public_key != delegate.stake_authority[0]:
+            return False
+
+        if base58.encode(init.custodian) != _SYSTEM_PROGRAM_ID:
+            return False
+        if init.unix_timestamp != 0 or init.epoch != 0:
+            return False
+
+        stake_account = create.created_account[0]
+        if stake_account != init.uninitialized_stake_account[0]:
+            return False
+        if stake_account != delegate.initialized_stake_account[0]:
+            return False
+
+        if is_address_reference(delegate.vote_account) or is_address_reference(
+            delegate.initialized_stake_account
+        ):
+            return False
+
+        if signer_public_key != init.withdrawer:
+            await confirm_stake_withdrawer(init.withdrawer, chunkify)
+
+        await confirm_stake_transaction(
+            fee=fee,
+            signer_path=signer_path,
+            blockhash=blockhash,
+            create=create,
+            delegate=delegate,
+            chunkify=chunkify,
+        )
+        return True
+
+    if all(map(StakeProgramDeactivateInstruction.is_type_of, instructions)):
+        from .layout import confirm_unstake_transaction
+
+        for deactivate in instructions:
+            if signer_public_key != deactivate.stake_authority[0]:
+                return False
+
+        await confirm_unstake_transaction(
+            fee=fee, signer_path=signer_path, blockhash=blockhash, chunkify=chunkify
+        )
+        return True
+
+    if all(map(StakeProgramWithdrawInstruction.is_type_of, instructions)):
+        from .layout import confirm_claim_recipient, confirm_claim_transaction
+
+        total_amount = 0
+        recipient = instructions[0].recipient_account[0]
+        for withdraw in instructions:
+            if signer_public_key != withdraw.withdrawal_authority[0]:
+                return False
+            if is_address_reference(withdraw.recipient_account):
+                return False
+            if recipient != withdraw.recipient_account[0]:
+                return False
+            total_amount += withdraw.lamports
+
+        if recipient != signer_public_key:
+            await confirm_claim_recipient(recipient, chunkify)
+
+        await confirm_claim_transaction(
+            fee=fee,
+            signer_path=signer_path,
+            blockhash=blockhash,
+            total_amount=total_amount,
+            chunkify=chunkify,
+        )
+
+        return True
+
+    # not a staking transaction
+    return False

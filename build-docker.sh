@@ -1,0 +1,626 @@
+#!/usr/bin/env bash
+set -e -o pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+############## Select the right Alpine architecture ##############
+
+if [ -z "$ALPINE_ARCH" ]; then
+  arch="$(uname -m)"
+  case "$arch" in
+    aarch64|arm64)
+      ALPINE_ARCH="aarch64"
+      ;;
+    x86_64)
+      ALPINE_ARCH="x86_64"
+      ;;
+    *)
+      echo "Unsupported arch"
+      exit
+  esac
+fi
+
+if [ -z "$ALPINE_CHECKSUM" ]; then
+  case "$ALPINE_ARCH" in
+    aarch64)
+      ALPINE_CHECKSUM="1be50ae27c8463d005c4de16558d239e11a88ac6b2f8721c47e660fbeead69bf"
+      ;;
+    x86_64)
+      ALPINE_CHECKSUM="ec7ec80a96500f13c189a6125f2dbe8600ef593b87fc4670fe959dc02db727a2"
+      ;;
+    *)
+      exit
+  esac
+ fi
+
+
+DOCKER=${DOCKER:-docker}
+CONTAINER_NAME=${CONTAINER_NAME:-trezor-firmware-env.nix}
+ALPINE_CDN=${ALPINE_CDN:-https://dl-cdn.alpinelinux.org/alpine}
+ALPINE_RELEASE=${ALPINE_RELEASE:-3.15}
+ALPINE_VERSION=${ALPINE_VERSION:-3.15.0}
+ALPINE_TARBALL=${ALPINE_FILE:-alpine-minirootfs-$ALPINE_VERSION-$ALPINE_ARCH.tar.gz}
+NIX_VERSION=${NIX_VERSION:-2.31.4}
+CONTAINER_FS_URL=${CONTAINER_FS_URL:-"$ALPINE_CDN/v$ALPINE_RELEASE/releases/$ALPINE_ARCH/$ALPINE_TARBALL"}
+
+############## Options parsing ##############
+
+function help_and_die() {
+  echo "Usage: $0 [options] tag"
+  echo "Options:"
+  echo "  --skip-bitcoinonly - do not build bitcoin-only firmwares"
+  echo "  --skip-normal - do not build regular firmwares"
+  echo "  --skip-translations - do not add the translations Merkle root to the fingerprints file"
+  echo "  --repository path/to/repo - checkout the repository from the given path/url"
+  echo "  --no-init - do not recreate docker environments"
+  echo "  --init-only - set up the docker environment and exit without building"
+  echo "  --models - comma-separated list of models. default: --models T1B1,T2B1,T2T1,T3T1,T3W1"
+  echo "  --targets - comma-separated list of targets for core build. default: --targets boardloader,bootloader,secmon,firmware"
+  echo "  --nrf - build nRF bootloader and firmware (for bluetooth devices, i.e. T3W1)"
+  echo "  --help"
+  echo
+  echo "Option --prodtest is deprecated. Use "--targets prodtest" to build prodtest."
+  echo "Set PRODUCTION=0 to run non-production builds."
+  echo "Set VENDOR_HEADER=vendorheader_prodtest_unsigned.bin to use the specified vendor header for prodtest."
+  echo "USE REPRODUCIBLE_XTASK_BUILD_OPTS to pass additional parameters for xtask build."
+  exit 0
+}
+
+OPT_BUILD_NORMAL=1
+OPT_BUILD_BITCOINONLY=1
+OPT_BUILD_NRF=0
+OPT_ADD_TRANSLATIONS=1
+INIT=1
+INIT_ONLY=0
+MODELS=(T1B1 T2B1 T2T1 T3T1 T3W1)
+CORE_TARGETS=(boardloader bootloader secmon firmware)
+
+REPOSITORY="file:///local"
+
+while true; do
+  case "$1" in
+    -h|--help)
+      help_and_die
+      ;;
+    --skip-bitcoinonly)
+      OPT_BUILD_BITCOINONLY=0
+      shift
+      ;;
+    --skip-normal)
+      OPT_BUILD_NORMAL=0
+      shift
+      ;;
+    --skip-translations)
+      OPT_ADD_TRANSLATIONS=0
+      shift
+      ;;
+    --repository)
+      REPOSITORY="$2"
+      shift 2
+      ;;
+    --no-init)
+      INIT=0
+      shift
+      ;;
+    --init-only)
+      INIT_ONLY=1
+      shift
+      ;;
+    --models)
+      # take comma-separated next argument and turn it into an array
+      IFS=',' read -r -a MODELS <<< "$2"
+      shift 2
+      ;;
+    --targets)
+      # take comma-separated next argument and turn it into an array
+      IFS=',' read -r -a CORE_TARGETS <<< "$2"
+      shift 2
+      ;;
+    --nrf)
+      OPT_BUILD_NRF=1
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ -z "$1" ]; then
+  help_and_die
+fi
+
+################## Variant selection ##################
+
+variants=()
+if [ "$OPT_BUILD_NORMAL" -eq 1 ]; then
+  variants+=(0)
+fi
+if [ "$OPT_BUILD_BITCOINONLY" -eq 1 ]; then
+  variants+=(1)
+fi
+
+VARIANTS=("${variants[@]}")
+
+# A single override suffix cannot safely represent both variants at once.
+if [ -n "${DIRSUFFIX_OVERRIDE:-}" ] && [ "$OPT_BUILD_NORMAL" -eq 1 ] && [ "$OPT_BUILD_BITCOINONLY" -eq 1 ]; then
+  echo "DIRSUFFIX_OVERRIDE requires selecting exactly one variant (--skip-normal or --skip-bitcoinonly)."
+  exit 1
+fi
+
+TAG="$1"
+COMMIT_HASH="$(git rev-parse "$TAG^{commit}")"
+PRODUCTION=${PRODUCTION:-1}
+
+if which wget > /dev/null ; then
+  wget --no-verbose --no-config -nc -P ci/ "$CONTAINER_FS_URL"
+else
+  if ! [ -f "ci/$ALPINE_TARBALL" ]; then
+    curl --no-progress-meter -L -o "ci/$ALPINE_TARBALL" "$CONTAINER_FS_URL"
+  fi
+fi
+
+# check alpine checksum
+if command -v shasum &> /dev/null ; then
+    echo "${ALPINE_CHECKSUM}  ci/${ALPINE_TARBALL}" | shasum -a 256 -c
+else
+    echo "${ALPINE_CHECKSUM}  ci/${ALPINE_TARBALL}" | sha256sum -c
+fi
+
+tag_clean="${TAG//[^a-zA-Z0-9]/_}"
+SNAPSHOT_NAME="${CONTAINER_NAME}__${tag_clean}"
+
+mkdir -p build
+
+# if not initializing, does the image exist?
+if [ $INIT -eq 0 ] && ! $DOCKER image inspect $SNAPSHOT_NAME > /dev/null; then
+  echo "Image $SNAPSHOT_NAME does not exist."
+  exit 1
+fi
+
+GIT_CLEAN_REPO="git clean -dfx -e .venv"
+SCRIPT_NAME="._setup_script"
+
+if [ $INIT -eq 1 ]; then
+
+  SELECTED_CONTAINER="$CONTAINER_NAME"
+
+  echo
+  echo ">>> DOCKER BUILD ALPINE_VERSION=$ALPINE_VERSION ALPINE_ARCH=$ALPINE_ARCH NIX_VERSION=$NIX_VERSION -t $CONTAINER_NAME"
+  echo
+
+  # some Nix installations have problem with shell.nix -> ci/shell.nix symlink
+  # docker can't handle ci/shell.nix -> shell.nix
+  # let's copy the file and try to fix paths ...
+  sed "s|./ci/|./|" < shell.nix > ci/shell.nix
+
+  $DOCKER build \
+    --network=host \
+    --build-arg ALPINE_VERSION="$ALPINE_VERSION" \
+    --build-arg ALPINE_ARCH="$ALPINE_ARCH" \
+    --build-arg NIX_VERSION="$NIX_VERSION" \
+    -t "$CONTAINER_NAME" \
+    ci/
+
+  cat <<EOF > "$SCRIPT_NAME"
+    #!/bin/bash
+    set -e -o pipefail
+
+    mkdir -p /reproducible-build
+    cd /reproducible-build
+    # ignore ownership of the local repo
+    git config --global --add safe.directory /local/.git
+    git clone --branch="$TAG" --depth=1 "$REPOSITORY" trezor-firmware
+    cd trezor-firmware
+EOF
+
+else  # init == 0
+
+  SELECTED_CONTAINER="$SNAPSHOT_NAME"
+
+  cat <<EOF > "$SCRIPT_NAME"
+    #!/bin/bash
+    set -e -o pipefail
+
+    cd /reproducible-build/trezor-firmware
+EOF
+
+fi  # init
+
+# append common part to script
+cat <<EOF >> "$SCRIPT_NAME"
+  # With --no-init the snapshot's checkout is pinned at the commit it was
+  # created from. Bring it to the requested commit, so that the environment can
+  # be reused when only the sources moved (e.g. a signed secmon binary was
+  # committed between the secmon and firmware builds). Toolchain changes still
+  # require a re-init.
+  if [ "\$(git rev-parse HEAD)" != "${COMMIT_HASH}" ]; then
+    echo ">>> UPDATING CHECKOUT TO $TAG (${COMMIT_HASH})"
+    git fetch --depth=1 origin "$TAG"
+    git checkout --detach "${COMMIT_HASH}"
+    touch /build/._checkout_updated
+  fi
+EOF
+
+if [ $INIT -eq 0 ]; then
+  cat <<EOF >> "$SCRIPT_NAME"
+  if ! sed "s|./ci/|./|" shell.nix | cmp -s - /shell.nix; then
+    echo "shell.nix changed since this environment was initialized."
+    echo "Re-run without --no-init to rebuild it."
+    exit 1
+  fi
+EOF
+fi
+
+cat <<EOF >> "$SCRIPT_NAME"
+  $GIT_CLEAN_REPO
+  git submodule update --init --recursive --depth 1
+  uv sync --locked
+  cd core/embed/rust
+  cargo fetch
+
+  echo
+  echo ">>> AT COMMIT \$(git rev-parse HEAD)"
+  echo
+EOF
+
+echo
+echo ">>> DOCKER REFRESH $SNAPSHOT_NAME"
+echo
+
+rm -f build/._checkout_updated
+
+$DOCKER run \
+  --network=host \
+  -v "$PWD:/local" \
+  -v "$PWD/build:/build" \
+  --name "$SNAPSHOT_NAME" \
+  "$SELECTED_CONTAINER" \
+  /nix/var/nix/profiles/default/bin/nix-shell --run "bash /local/$SCRIPT_NAME" \
+  || ($DOCKER rm "$SNAPSHOT_NAME"; exit 1)
+
+rm $SCRIPT_NAME
+
+# The refresh only changes the environment when it moves the checkout (any
+# dependency change implies a new commit, since the lock files are part of the
+# repository). A fresh init must always be committed, while a reused snapshot
+# whose checkout was already current can skip the costly docker commit.
+if [ $INIT -eq 1 ] || [ -f build/._checkout_updated ]; then
+  echo
+  echo ">>> DOCKER COMMIT $SNAPSHOT_NAME"
+  echo
+  $DOCKER commit "$SNAPSHOT_NAME" "$SNAPSHOT_NAME"
+else
+  echo
+  echo ">>> DOCKER COMMIT SKIPPED (environment unchanged)"
+  echo
+fi
+$DOCKER rm "$SNAPSHOT_NAME"
+rm -f build/._checkout_updated
+
+if [ $INIT_ONLY -eq 1 ]; then
+  exit 0
+fi
+
+# stat under macOS has slightly different cli interface
+USER=$(stat -c "%u" . 2>/dev/null || stat -f "%u" .)
+GROUP=$(stat -c "%g" . 2>/dev/null || stat -f "%g" .)
+
+DIR=$(pwd)
+
+# build core
+
+CORE_FIRMWARE_BUILT=0
+
+for TREZOR_MODEL in ${MODELS[@]}; do
+  if [ "$TREZOR_MODEL" = "T1B1" ]; then
+    continue
+  fi
+  for BITCOIN_ONLY in ${VARIANTS[@]}; do
+
+    DIRSUFFIX=${BITCOIN_ONLY/1/-bitcoinonly}
+    DIRSUFFIX=${DIRSUFFIX/0/}
+    DIRSUFFIX=${DIRSUFFIX_OVERRIDE:-$DIRSUFFIX}
+    DIRSUFFIX="-${TREZOR_MODEL}${DIRSUFFIX}"
+
+    MAKE_TARGETS=""
+    for TARGET in ${CORE_TARGETS[@]}; do
+      if [ "$BITCOIN_ONLY" = "1" ]; then
+        # Skip targets that have no bitcoin-only variant.
+        case "$TARGET" in boardloader|bootloader|secmon|prodtest)
+            continue
+            ;;
+        esac
+      fi
+      MAKE_TARGETS="$MAKE_TARGETS build_$TARGET"
+    done
+
+    if [ -z "$MAKE_TARGETS" ]; then
+      continue
+    fi
+
+    if [[ "$MAKE_TARGETS" == *build_firmware* ]]; then
+      CORE_FIRMWARE_BUILT=1
+    fi
+
+    SCRIPT_NAME=".build_core_${TREZOR_MODEL}_${BITCOIN_ONLY}.sh"
+    cat <<EOF > "build/$SCRIPT_NAME"
+      # DO NOT MODIFY!
+      # this file was generated by ${BASH_SOURCE[0]}
+      # variant: core build BITCOIN_ONLY=$BITCOIN_ONLY TREZOR_MODEL=$TREZOR_MODEL
+      set -e -o pipefail
+      cd /reproducible-build/trezor-firmware/core
+      $GIT_CLEAN_REPO
+      rm -rf /build/*
+      uv run make clean vendor $MAKE_TARGETS QUIET_MODE=1
+      for binary in build-xtask/artifacts/$TREZOR_MODEL/*.bin; do
+        uv run ../tools/check-insecure-prng.py --absent "\$binary"
+      done
+      for item in bootloader secmon kernel firmware prodtest; do
+        # Append the labeled fingerprint, preceded by '# <artifact name>'.
+        if [ "\$item" != kernel ] && [ -s build-xtask/artifacts/$TREZOR_MODEL/\$item.bin ]; then
+          src=\$(ls build-xtask/artifacts/pub/\$item-$TREZOR_MODEL*.bin 2>/dev/null | head -n1 || true)
+          src=\${src##*/}
+          {
+            echo "# core${DIRSUFFIX}/\$item/\${src:-\$item.bin}"
+            uv run ../python/tools/firmware-fingerprint.py \
+                build-xtask/artifacts/$TREZOR_MODEL/\$item.bin
+            echo
+          } >> /local/build/${COMMIT_HASH}.fingerprints
+        fi
+        if [ -f build-xtask/artifacts/$TREZOR_MODEL/\$item.elf ]; then
+          # copy only the artifacts to the build output directory
+          mkdir -p /build/\$item/
+          gzip build-xtask/artifacts/$TREZOR_MODEL/\$item.elf
+          cp -v build-xtask/artifacts/$TREZOR_MODEL/\$item* /build/\$item/
+          pub_bin=(build-xtask/artifacts/pub/\$item-$TREZOR_MODEL-*.bin)
+          if [ -f "\$pub_bin" ]; then
+            cp -v "\${pub_bin[@]}" /build/\$item/
+          fi  # no pub bin for kernel, or for secmon when built only as a dependency
+        fi
+      done
+      chown -R $USER:$GROUP /build
+      chown $USER:$GROUP /local/build/${COMMIT_HASH}.fingerprints 2>/dev/null || true
+EOF
+
+    echo
+    echo ">>> DOCKER RUN core BITCOIN_ONLY=$BITCOIN_ONLY TREZOR_MODEL=$TREZOR_MODEL PRODUCTION=$PRODUCTION"
+    echo "    (targets: ${CORE_TARGETS[@]})"
+    echo
+
+    $DOCKER run \
+      --network=host \
+      --rm \
+      -v "$DIR:/local" \
+      -v "$DIR/build/core$DIRSUFFIX":/build:z \
+      --env BITCOIN_ONLY="$BITCOIN_ONLY" \
+      --env TREZOR_MODEL="$TREZOR_MODEL" \
+      --env PRODUCTION="$PRODUCTION" \
+      --env VENDOR_HEADER="$VENDOR_HEADER" \
+      --env XTASK_BUILD_OPTS="$REPRODUCIBLE_XTASK_BUILD_OPTS" \
+      --init \
+      "$SNAPSHOT_NAME" \
+      /nix/var/nix/profiles/default/bin/nix-shell --run "bash /local/build/$SCRIPT_NAME"
+  done
+done
+
+# build nRF bootloader and firmware
+if [ "$OPT_BUILD_NRF" -eq 1 ]; then
+  SCRIPT_NAME=".build_nrf.sh"
+  cat <<EOF > "build/$SCRIPT_NAME"
+    # DO NOT MODIFY!
+    # this file was generated by ${BASH_SOURCE[0]}
+    # variant: nrf build
+    set -e -o pipefail
+
+    echo "=== Toolchain Debug Info ==="
+    echo "ZEPHYR_TOOLCHAIN_VARIANT: \$ZEPHYR_TOOLCHAIN_VARIANT"
+    echo "GNUARMEMB_TOOLCHAIN_PATH: \$GNUARMEMB_TOOLCHAIN_PATH"
+    echo "ARM GCC location: \$(which arm-none-eabi-gcc)"
+    echo "ARM GCC version: \$(arm-none-eabi-gcc --version | head -1)"
+
+    # Initialize west workspace
+    echo "=== cleaning git repo ==="
+    cd /reproducible-build/trezor-firmware/nordic/trezor
+    $GIT_CLEAN_REPO
+    echo "=== west initializing workspace ==="
+    cd /reproducible-build/trezor-firmware/nordic
+    uv run west init -l ./trezor || echo "West already initialized"
+    echo "=== west update ==="
+    uv run west update
+
+    # Build using the script
+    echo "=== running build_sign_flash ==="
+    cd /reproducible-build/trezor-firmware/nordic/trezor
+    if [ "$PRODUCTION" = "1" ]; then
+      uv run scripts/build_sign_flash.sh -b t3w1_revA_nrf52832 -p -c -s
+    else
+      uv run scripts/build_sign_flash.sh -b t3w1_revA_nrf52832 -d -c -s
+    fi
+
+    # Generate fingerprints
+    echo "=== Generating fingerprints for nrf binary files ==="
+    cd /reproducible-build/trezor-firmware/nordic/trezor
+
+    # Generate fingerprint for bootloader
+    if [ -f "build/mcuboot/zephyr/zephyr.bin" ]; then
+        echo "Generating fingerprint for: build/mcuboot/zephyr/zephyr.bin"
+        sha256sum "build/mcuboot/zephyr/zephyr.bin" | cut -d' ' -f1 > "build/mcuboot/zephyr/zephyr.bin.fingerprint"
+        echo "Created: build/mcuboot/zephyr/zephyr.bin.fingerprint"
+    else
+        echo "File not found: build/mcuboot/zephyr/zephyr.bin"
+    fi
+
+    # Generate fingerprint for firmware
+    if [ -f "build/trezor-ble/zephyr/zephyr.signed_trz.bin" ]; then
+        echo "Generating fingerprint for: build/trezor-ble/zephyr/zephyr.signed_trz.bin"
+        sha256sum "build/trezor-ble/zephyr/zephyr.signed_trz.bin" | cut -d' ' -f1 > "build/trezor-ble/zephyr/zephyr.signed_trz.bin.fingerprint"
+        echo "Created: build/trezor-ble/zephyr/zephyr.signed_trz.bin.fingerprint"
+    else
+        echo "File not found: build/trezor-ble/zephyr/zephyr.signed_trz.bin"
+    fi
+
+    # Create output directory structure and copy artifacts
+    echo "=== Copy built files back to host ==="
+    mkdir -p /build/bootloader /build/firmware
+    cd /reproducible-build/trezor-firmware/nordic/trezor
+
+    # Copy nRF bootloader (MCUboot)
+    if [ -f build/mcuboot/zephyr/zephyr.hex ]; then
+      cp build/mcuboot/zephyr/zephyr.hex /build/bootloader/nrf-bootloader.hex
+      cp build/mcuboot/zephyr/zephyr.bin /build/bootloader/nrf-bootloader.bin
+      cp build/mcuboot/zephyr/zephyr.bin.fingerprint /build/bootloader/nrf-bootloader.bin.fingerprint 2>/dev/null || true
+    fi
+
+    # Copy signed nRF application firmware
+    if [ -f build/trezor-ble/zephyr/zephyr.signed_trz.hex ]; then
+      cp build/trezor-ble/zephyr/zephyr.signed_trz.hex /build/firmware/nrf-firmware.hex
+      cp build/trezor-ble/zephyr/zephyr.signed_trz.bin /build/firmware/nrf-firmware.bin
+      cp build/trezor-ble/zephyr/zephyr.signed_trz.bin.fingerprint /build/firmware/nrf-firmware.bin.fingerprint 2>/dev/null || true
+    fi
+
+    # Copy nRF ELF file (from unsigned build)
+    if [ -f build/trezor-ble/zephyr/zephyr.elf ]; then
+      cp build/trezor-ble/zephyr/zephyr.elf /build/firmware/nrf-firmware.elf
+    fi
+
+    # Copy merged signed nRF firmware
+    if [ -f build/zephyr.merged.signed_trz.hex ]; then
+      cp build/zephyr.merged.signed_trz.hex /build/firmware/nrf-firmware.merged.hex
+    fi
+
+    echo "=== NRF repro build DONE ==="
+
+    chown -R $USER:$GROUP /build
+EOF
+
+  echo
+  echo ">>> DOCKER RUN nrf PRODUCTION=$PRODUCTION"
+  echo
+
+  $DOCKER run \
+    --network=host \
+    --rm \
+    -v "$DIR:/local" \
+    -v "$DIR/build/nrf":/build:z \
+    --env PRODUCTION="$PRODUCTION" \
+    --env TREZOR_FIRMWARE_ACCEPT_JLINK_LICENSE="yes" \
+    --env ZEPHYR_TOOLCHAIN_VARIANT="gnuarmemb" \
+    --env GNUARMEMB_TOOLCHAIN_PATH="/nix/store/n6qhvpsx5ldqazhmx5lc9lyjdbmq8zj2-gcc-arm-embedded-13.3.rel1" \
+    --init \
+    "$SNAPSHOT_NAME" \
+    /nix/var/nix/profiles/default/bin/nix-shell --arg devTools true --run "bash /local/build/$SCRIPT_NAME"
+fi
+
+# build legacy
+
+if echo "${MODELS[@]}" | grep -q T1B1 && echo "${CORE_TARGETS[@]}" | grep -qw firmware ; then
+  for BITCOIN_ONLY in ${VARIANTS[@]}; do
+
+    DIRSUFFIX=${BITCOIN_ONLY/1/-bitcoinonly}
+    DIRSUFFIX=${DIRSUFFIX/0/}
+    DIRSUFFIX="-T1B1${DIRSUFFIX}"
+
+    SCRIPT_NAME=".build_legacy_$BITCOIN_ONLY.sh"
+    cat <<EOF > "build/$SCRIPT_NAME"
+      # DO NOT MODIFY!
+      # this file was generated by ${BASH_SOURCE[0]}
+      # variant: legacy build BITCOIN_ONLY=$BITCOIN_ONLY
+      set -e -o pipefail
+      cd /reproducible-build/trezor-firmware/legacy
+      $GIT_CLEAN_REPO
+      ln -s /build build
+      uv run script/cibuild
+      mkdir -p build/bootloader build/firmware build/intermediate_fw
+      cp bootloader/bootloader.bin build/bootloader/bootloader.bin
+      cp intermediate_fw/trezor.bin build/intermediate_fw/inter.bin
+      cp firmware/trezor.bin build/firmware/firmware.bin
+      cp firmware/firmware*.bin build/firmware/ || true  # ignore missing file as it will not be present in old tags
+      cp firmware/trezor.elf build/firmware/firmware.elf
+      src=\$(ls build/firmware/firmware-T1B1*.bin 2>/dev/null | head -n1 || true)
+      src=\${src##*/}
+      {
+        echo "# legacy${DIRSUFFIX}/firmware/\${src:-firmware.bin}"
+        uv run ../python/tools/firmware-fingerprint.py build/firmware/firmware.bin
+        echo
+      } >> /local/build/${COMMIT_HASH}.fingerprints
+      chown -R $USER:$GROUP /build
+      chown $USER:$GROUP /local/build/${COMMIT_HASH}.fingerprints 2>/dev/null || true
+EOF
+
+    echo
+    echo ">>> DOCKER RUN legacy BITCOIN_ONLY=$BITCOIN_ONLY PRODUCTION=$PRODUCTION"
+    echo
+
+    $DOCKER run \
+      --network=host \
+      --rm \
+      -v "$DIR:/local" \
+      -v "$DIR/build/legacy$DIRSUFFIX":/build:z \
+      --env BITCOIN_ONLY="$BITCOIN_ONLY" \
+      --env PRODUCTION="$PRODUCTION" \
+      --init \
+      "$SNAPSHOT_NAME" \
+      /nix/var/nix/profiles/default/bin/nix-shell --run "bash /local/build/$SCRIPT_NAME"
+  done
+fi
+
+echo
+echo "Docker image retained as $SNAPSHOT_NAME"
+echo "To remove it, run:"
+echo "  docker rmi $SNAPSHOT_NAME"
+
+# all built, show fingerprints
+
+echo
+echo "Built from commit $COMMIT_HASH"
+echo
+
+FINGERPRINTS_FILE="build/${COMMIT_HASH}.fingerprints"
+MASTER_FILE="build/${COMMIT_HASH}.master"
+if [ -f "$FINGERPRINTS_FILE" ]; then
+  # Append the translations root if a firmware that consumes them was built and
+  # compute the master fingerprint.
+  $DOCKER run \
+      --network=host \
+      --rm \
+      -v "$DIR:/local" \
+      --init \
+      "$SNAPSHOT_NAME" \
+      /nix/var/nix/profiles/default/bin/nix-shell --run \
+        "cd /reproducible-build/trezor-firmware \
+         && if [ $OPT_ADD_TRANSLATIONS -eq 1 ] && [ $CORE_FIRMWARE_BUILT -eq 1 ] \
+               && ! grep -q '^translations:' /local/$FINGERPRINTS_FILE; then \
+              translations_root=\$(uv run core/translations/cli.py merkle-root) \
+              && { echo '# core/translations'; \
+                   echo \"translations: \$translations_root\"; \
+                   echo; } >> /local/$FINGERPRINTS_FILE; \
+            fi \
+         && uv run python/tools/master-fingerprint.py /local/$FINGERPRINTS_FILE \
+              > /local/$MASTER_FILE \
+         && chown $USER:$GROUP /local/$MASTER_FILE" \
+    || { rm -f "$MASTER_FILE"; exit 1; }
+  echo "Fingerprints ($FINGERPRINTS_FILE):"
+  echo
+  cat "$FINGERPRINTS_FILE"
+  cat "$MASTER_FILE"
+else
+  echo "(no core/legacy firmware images built)"
+fi
+
+# nRF fingerprints (if built) use a plain sha256 of the whole binary and are not
+# part of the labeled fingerprints file.
+if [ "$OPT_BUILD_NRF" -eq 1 ]; then
+  NRF_BUILD_DIR=build/nrf
+  if [ -d "$NRF_BUILD_DIR" ]; then
+    echo
+    echo "nRF fingerprints:"
+    for file in $NRF_BUILD_DIR/firmware/*.fingerprint $NRF_BUILD_DIR/bootloader/*.fingerprint; do
+      if [ -f "$file" ]; then
+        origfile="${file%.fingerprint}"
+        fingerprint=$(tr -d '\n' < "$file")
+        echo "$fingerprint $origfile"
+      fi
+    done
+  fi
+fi

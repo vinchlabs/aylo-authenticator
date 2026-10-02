@@ -1,0 +1,265 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+#ifdef KERNEL_MODE
+#include <trezor_bsp.h>
+#include <trezor_model.h>
+#include <trezor_rtl.h>
+
+#include <io/display.h>
+#include <sys/irq.h>
+#include <sys/mpu.h>
+#include <sys/systick.h>
+#include <sys/trustzone.h>
+
+#include "display_internal.h"
+
+#define ALIGNED_PHYSICAL_FRAME_BUFFER_SIZE \
+  ALIGN_UP_CONST(PHYSICAL_FRAME_BUFFER_SIZE, PHYSICAL_FRAME_BUFFER_ALIGNMENT)
+
+// Physical frame buffers in internal SRAM memory.
+// Both frame buffers layers in the fixed addresses that
+// are shared between bootloaders and the firmware.
+__attribute__((section(".fb1"),
+               aligned(PHYSICAL_FRAME_BUFFER_ALIGNMENT))) uint8_t
+    physical_frame_buffer_0[ALIGNED_PHYSICAL_FRAME_BUFFER_SIZE];
+
+#if (FRAME_BUFFER_COUNT > 1)
+__attribute__((section(".fb2"),
+               aligned(PHYSICAL_FRAME_BUFFER_ALIGNMENT))) uint8_t
+    physical_frame_buffer_1[ALIGNED_PHYSICAL_FRAME_BUFFER_SIZE];
+#endif
+
+#ifdef USE_TRUSTZONE
+void display_set_unpriv_access(bool unpriv) {
+  // To allow unprivileged access both GFXMMU virtual buffers area and
+  // underlying SRAM region must be configured as unprivileged.
+
+  // Order of GFXMMU and SRAM unprivileged access configuration is important
+  // to avoid the situation the virtual frame buffer has lower privileges
+  // than underlying frame buffer in physical memory so LTDC could not
+  // refresh the display properly.
+
+#ifdef DISPLAY_GFXMMU
+  if (!unpriv) {
+    tz_set_gfxmmu_unpriv(unpriv);
+  }
+#endif
+
+  tz_set_sram_unpriv((uint32_t)physical_frame_buffer_0,
+                     PHYSICAL_FRAME_BUFFER_SIZE, unpriv);
+
+  tz_set_sram_unpriv((uint32_t)physical_frame_buffer_1,
+                     PHYSICAL_FRAME_BUFFER_SIZE, unpriv);
+
+#ifdef DISPLAY_GFXMMU
+  if (unpriv) {
+    tz_set_gfxmmu_unpriv(unpriv);
+  }
+#endif
+}
+#endif  //  USE_TRUSTZONE
+
+// Returns the pointer to the physical frame buffer (0.. FRAME_BUFFER_COUNT-1)
+// Returns NULL if the framebuffer index is out of range.
+static uint8_t *get_fb_ptr(int16_t index) {
+#ifdef DISPLAY_GFXMMU
+  if (index == 0) {
+    return (uint8_t *)GFXMMU_VIRTUAL_BUFFER0_BASE;
+#if (FRAME_BUFFER_COUNT > 1)
+  } else if (index == 1) {
+    return (uint8_t *)GFXMMU_VIRTUAL_BUFFER1_BASE;
+#endif
+#else
+  if (index == 0) {
+    return physical_frame_buffer_0;
+#if (FRAME_BUFFER_COUNT > 1)
+  } else if (index == 1) {
+    return physical_frame_buffer_1;
+#endif
+#endif
+  } else {
+    return NULL;
+  }
+}
+
+bool display_get_frame_buffer(display_fb_info_t *fb) {
+  display_driver_t *drv = &g_display_driver;
+
+  memset(fb, 0, sizeof(display_fb_info_t));
+
+  if (!drv->initialized) {
+    return false;
+  }
+
+#if PANEL_LTDC_PIXEL_FORMAT == LTDC_PIXEL_FORMAT_ARGB8888
+#define FB_PIXEL_SIZE 4
+#elif PANEL_LTDC_PIXEL_FORMAT == LTDC_PIXEL_FORMAT_RGB565
+#define FB_PIXEL_SIZE 2
+#endif
+
+  fb_queue_wait(&drv->empty_frames);
+  int16_t fb_idx = fb_queue_peek(&drv->empty_frames);
+
+  if (fb_idx < 0) {
+    return false;
+  }
+
+  fb->ptr = get_fb_ptr(fb_idx);
+  fb->stride = FRAME_BUFFER_PIXELS_PER_LINE * FB_PIXEL_SIZE;
+  fb->size = fb->stride * DISPLAY_RESY;
+
+  mpu_set_active_fb(fb->ptr, fb->size);
+
+  return true;
+}
+
+void display_refresh(void) {
+  display_driver_t *drv = &g_display_driver;
+
+  if (!drv->initialized) {
+    return;
+  }
+
+  if (!fb_queue_peeked(&drv->empty_frames)) {
+    // No refresh needed as the frame buffer is not in
+    // the state to be copied to the display
+    return;
+  }
+
+#if REFRESH_RATE_SCALING_SUPPORTED
+  // IRQs locked to make sure that no IRQ gets served in beween the following
+  // 2 function calls including the IRQ context call of
+  // display_refresh_rate_timeout_check() function.
+  irq_key_t key = irq_lock();
+
+  // Change the display refresh rate to the high refresh rate.
+  display_refresh_rate_set(REFRESH_RATE_HI);
+  // Set/refresh the timeout for return to the low refresh rate.
+  display_refresh_rate_timeout_set();
+
+  irq_unlock(key);
+#endif
+
+  fb_queue_put(&drv->ready_frames, fb_queue_take(&drv->empty_frames));
+}
+
+void display_ensure_refreshed(void) {
+  display_driver_t *drv = &g_display_driver;
+
+  if (!drv->initialized) {
+    return;
+  }
+
+  if (!is_mode_exception()) {
+    bool copy_pending;
+
+    // Wait until all frame buffers are written to the display
+    //  so we can be sure there's not scheduled or pending
+    // background copying
+    do {
+      irq_key_t key = irq_lock();
+      copy_pending =
+          !fb_queue_empty(&drv->ready_frames) || drv->update_pending > 0;
+      irq_unlock(key);
+      __WFI();
+    } while (copy_pending);
+  }
+}
+
+void display_fb_clear(void) {
+  mpu_set_active_fb(physical_frame_buffer_0, PHYSICAL_FRAME_BUFFER_SIZE);
+  memset(physical_frame_buffer_0, 0, PHYSICAL_FRAME_BUFFER_SIZE);
+  mpu_set_active_fb(physical_frame_buffer_1, PHYSICAL_FRAME_BUFFER_SIZE);
+  memset(physical_frame_buffer_1, 0, PHYSICAL_FRAME_BUFFER_SIZE);
+  mpu_set_active_fb(NULL, 0);
+}
+
+uint32_t display_fb_init(void) {
+  display_fb_clear();
+
+  fb_queue_reset(&g_display_driver.empty_frames);
+  fb_queue_reset(&g_display_driver.ready_frames);
+
+  fb_queue_put(&g_display_driver.empty_frames, 1);
+
+  g_display_driver.active_frame = 0;
+
+  return (uint32_t)get_fb_ptr(0);
+}
+
+void HAL_LTDC_LineEvenCallback(LTDC_HandleTypeDef *hltdc) {
+  display_driver_t *drv = &g_display_driver;
+
+  if (!drv->initialized) {
+    return;
+  }
+
+#if REFRESH_RATE_SCALING_SUPPORTED
+  if (drv->refresh_rate_state == REFRESH_RATE_UPDATING) {
+    display_refresh_rate_config();
+
+    // Configure the next line event for standard operation.
+    HAL_LTDC_ProgramLineEvent(&drv->hlcd_ltdc, LINE_EVENT_GENERAL_LINE);
+  } else {
+    display_refresh_rate_timeout_check();
+
+    // Process pending frame buffer update.
+    if (drv->update_pending > 0) {
+      drv->update_pending--;
+    }
+
+    int16_t fb_idx = fb_queue_take(&drv->ready_frames);
+    if (fb_idx >= 0) {
+      fb_queue_put(&drv->empty_frames, drv->active_frame);
+      drv->active_frame = fb_idx;
+      display_set_fb((uint32_t)get_fb_ptr(drv->active_frame));
+      drv->update_pending = 3;
+    }
+
+    // Is refresh rate update requested? Configure the line event for the
+    // proper time to perform VFP update.
+    if (drv->refresh_rate_state == REFRESH_RATE_REQUESTED) {
+      // Configure the line event for the proper time to perform VFP update.
+      HAL_LTDC_ProgramLineEvent(&drv->hlcd_ltdc, LINE_EVENT_REFRESH_RATE_LINE);
+
+      // The line event has been configured. Moving to the UPDATING state.
+      drv->refresh_rate_state = REFRESH_RATE_UPDATING;
+    } else {
+      // Configure the next line event for standard operation.
+      HAL_LTDC_ProgramLineEvent(&drv->hlcd_ltdc, LINE_EVENT_GENERAL_LINE);
+    }
+  }
+#else
+  if (drv->update_pending > 0) {
+    drv->update_pending--;
+  }
+
+  int16_t fb_idx = fb_queue_take(&drv->ready_frames);
+  if (fb_idx >= 0) {
+    fb_queue_put(&drv->empty_frames, drv->active_frame);
+    drv->active_frame = fb_idx;
+    display_set_fb((uint32_t)get_fb_ptr(drv->active_frame));
+    drv->update_pending = 3;
+  }
+
+  HAL_LTDC_ProgramLineEvent(&drv->hlcd_ltdc, LINE_EVENT_GENERAL_LINE);
+#endif  // REFRESH_RATE_SCALING_SUPPORTED
+}
+
+#endif

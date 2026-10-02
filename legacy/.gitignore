@@ -1,0 +1,13 @@
+build
+build/
+*.a
+*.bin
+*.d
+!.changelog.d
+*.elf
+*.hex
+*.img
+*.list
+*.log
+*.o
+*.srec

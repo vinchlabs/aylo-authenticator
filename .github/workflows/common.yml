@@ -1,0 +1,202 @@
+name: Common
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '14 23 * * *'  # every day @ 23:14
+  push:
+    branches:
+      - 'release/**'
+      - 'secfix/**'
+
+
+# cancel any previous runs on the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read        # for actions/checkout
+
+jobs:
+  crypto_build:
+    name: Crypto library
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CC: gcc
+      ADDRESS_SANITIZER: 1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - run: cp -r crypto crypto_noasan
+      - run: nix-shell --run "uv run make -C crypto"
+      - run: nix-shell --run "export ADDRESS_SANITIZER=0; uv run make -C crypto_noasan"
+      - run: mv crypto_noasan/tests/test_check crypto/tests/test_check_noasan
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: crypto-build
+          path: |
+            crypto/tests/aestst
+            crypto/tests/libtrezor-crypto.so
+            crypto/tests/test_check
+            crypto/tests/test_check_noasan
+            crypto/tests/test_openssl
+          retention-days: 7
+
+  crypto_test:
+    name: Crypto test
+    needs: [crypto_build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ASAN_OPTIONS: "verify_asan_link_order=0"
+      CK_TIMEOUT_MULTIPLIER: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: crypto-build
+          path: crypto/tests
+      - run: chmod +x crypto/tests/*
+      - run: ./crypto/tests/aestst
+      - run: ./crypto/tests/test_check
+      - run: ./crypto/tests/test_openssl 1000
+      - run: nix-shell --run "cd crypto && ITERS=10 uv run pytest tests"
+      - run: nix-shell --run "CK_TIMEOUT_MULTIPLIER=20 valgrind -q --error-exitcode=1 ./crypto/tests/test_check_noasan"
+
+  python_test:
+    name: Python test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      # LD_LIBRARY_PATH workaround: https://discourse.nixos.org/t/nixpkgs-nixos-unstable-many-package-fail-with-glibc-2-38-not-found/35078 https://github.com/NixOS/nixpkgs/issues/287764
+      - run: nix-shell --arg pythonTest true --run "unset LD_LIBRARY_PATH && cd python && uv run tox"
+
+  rust_test:
+    name: Rust crates test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "make -C rust check"
+
+  storage_test:
+    name: Storage test
+    # TODO: only for changes in storage/
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - run: unset PYTEST_TIMEOUT
+      - run: nix-shell --run "uv run make -C storage/tests build"
+      - run: nix-shell --run "uv run make -C storage/tests tests_all"
+
+  docs_build:
+    name: Docs build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+      - uses: ./.github/actions/environment
+        with:
+          pre-download: false
+      - run: |
+          cd docs
+          nix-shell -p mdbook mdbook-mermaid --run "mdbook build"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: docs-html
+          path: |
+            docs/mdbook*
+          retention-days: 7
+          if-no-files-found: error
+
+  docker_build:
+    name: Firmware docker build
+    # scheduled, manual runs, push to release branches
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T1B1, T2T1, T2B1, T3B1, T3T1, T3W1]
+    env:
+      REF: ${{ github.head_ref || github.ref_name }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - run: git checkout ${REF}
+
+      - run: mkdir _artifacts/
+
+      - name: Initialize build environment
+        run: ./build-docker.sh --init-only ${REF}
+
+      - name: Build prodtest & bootloader
+        # The T1B1 bootloader is built by the monolithic legacy build in the firmware step.
+        if: ${{ matrix.model != 'T1B1' }}
+        run: |
+          ./build-docker.sh --no-init --models ${{ matrix.model }} --targets 'prodtest,bootloader' --skip-bitcoinonly ${REF}
+          cd build/ && cp -v --recursive --parents * ../_artifacts/
+
+      - name: Build secmon
+        if: ${{ matrix.model == 'T3W1' }}
+        run: |
+          ./build-docker.sh --no-init --models ${{ matrix.model }} --targets 'secmon' --skip-bitcoinonly ${REF}
+          cd build/ && cp -v --recursive --parents * ../_artifacts/
+
+      - name: Build firmware
+        # T3W1 requires a signed secmon.
+        run: |
+          ./build-docker.sh --no-init --models ${{ matrix.model }} --targets 'firmware' ${REF}
+          cd build/ && cp -v --recursive --parents * ../_artifacts/
+
+      - name: Show fingerprints
+        run: |
+          tree _artifacts
+          COMMIT_HASH=$(git rev-parse HEAD)
+          fingerprints_file="_artifacts/${COMMIT_HASH}.fingerprints"
+          master_file="_artifacts/${COMMIT_HASH}.master"
+          if [ -f "$fingerprints_file" ]; then
+            {
+              echo '```'
+              cat "$fingerprints_file"
+              if [ -f "$master_file" ]; then
+                cat "$master_file"
+              fi
+              echo '```'
+            } >> $GITHUB_STEP_SUMMARY
+          fi
+          cat $GITHUB_STEP_SUMMARY
+        if: always()
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: reproducible-${{ matrix.model }}
+          path: |
+            _artifacts/
+          retention-days: 7
+        if: always()

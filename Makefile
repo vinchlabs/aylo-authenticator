@@ -1,0 +1,249 @@
+.PHONY: help \
+	style_check style \
+	pystyle_check pystyle_quick_check pystyle \
+	changelog_check changelog_style \
+	translations_style translations_style_check \
+	yaml_check editor_check \
+	cstyle_check cstyle \
+	protostyle protostyle_check \
+	defs_check \
+	ruststyle ruststyle_check \
+	typecheck pyright \
+	mocks mocks_check \
+	templates templates_check \
+	solana_templates solana_templates_check \
+	icons icons_check \
+	protobuf protobuf_check \
+	docs_summary_check \
+	vendorheader vendorheader_check \
+	bootloader_hashes bootloader_hashes_check \
+	lsgen lsgen_check \
+	tropic_config tropic_config_check \
+	hsm_keys hsm_keys_check \
+	prodtest_error_codes prodtest_error_codes_check \
+	certs certs_check \
+	python_doc python_doc_check \
+	gen gen_check \
+	uvlock_check \
+	workflow_timeout_check
+
+## help commands:
+
+help: ## show this help
+	@awk -f ./tools/help.awk $(MAKEFILE_LIST)
+
+## style commands:
+
+PY_FILES = $(shell find . -type f -name '*.py'   | sed 'sO^\./OO' | grep -f ./tools/style.py.include | grep -v -f ./tools/style.py.exclude ) common/protob/pb2py
+C_FILES =  $(shell find . -type f -name '*.[ch]' | grep -f ./tools/style.c.include  | grep -v -f ./tools/style.c.exclude )
+PROTO_FILES = $(shell find common core -type f -name '*.proto')
+RUST_CRATES = $(shell find core -type f -name Cargo.toml -printf "%h\n")
+
+style_check: pystyle_check ruststyle_check cstyle_check protostyle_check changelog_check translations_style_check yaml_check workflow_timeout_check docs_summary_check editor_check ## run all style checks
+
+style: pystyle ruststyle cstyle protostyle changelog_style translations_style ## apply all code styles (Python+Rust+C+protobuf+changelog+translation JSON)
+
+pystyle_check: ## run code style check on application sources and tests
+	flake8 --version
+	ruff --version
+	pylint --version
+	pyright --version
+	@echo [TYPECHECK]
+	@make -C core typecheck
+	@echo [TYPECHECK - COMMON and TOOLS]
+	@make typecheck
+	@echo [FLAKE8]
+	@flake8 $(PY_FILES)
+	@echo [RUFF]
+	@ruff check $(PY_FILES)
+	@ruff format --check $(PY_FILES)
+	@echo [PYLINT]
+	@pylint $(PY_FILES)
+	@echo [PYTHON]
+	make -C python style_check
+
+pystyle_quick_check: ## run the basic style checks, suitable for a quick git hook
+	@ruff format --check $(PY_FILES)
+	@ruff check --select I $(PY_FILES)
+	make -C python style_quick_check
+
+pystyle: ## apply code style on application sources and tests
+	@echo [RUFF]
+	@ruff check --fix $(PY_FILES)
+	@ruff format $(PY_FILES)
+	@echo [TYPECHECK]
+	@make -C core typecheck
+	@echo [TYPECHECK - COMMON and TOOLS]
+	@make typecheck
+	@echo [FLAKE8]
+	@flake8 $(PY_FILES)
+	@echo [PYLINT]
+	@pylint $(PY_FILES)
+	@echo [PYTHON]
+	make -C python style
+
+changelog_check: ## check changelog format
+	@echo [CHANGELOG-CHECK]
+	./tools/changelog.py check
+
+changelog_style: ## fix changelog format
+	@echo [CHANGELOG-STYLE]
+	./tools/changelog.py style
+
+translations_style: ## Format translation files
+	@echo [TRANSLATIONS-STYLE]
+	@./core/tools/translations/sort_keys.py
+
+translations_style_check: ## Check that translation files are properly formatted
+	@echo [TRANSLATIONS-STYLE-CHECK]
+	@./core/tools/translations/sort_keys.py check
+
+yaml_check: ## check yaml formatting
+	@echo [YAML-STYLE-CHECK]
+	yamllint --strict .
+
+workflow_timeout_check: ## check that all CI jobs declare a timeout
+	@echo [WORKFLOW-TIMEOUT-CHECK]
+	@./tools/check-workflow-timeouts.py
+
+editor_check: ## check editorconfig formatting
+	@echo [EDITORCONFIG-STYLE-CHECK]
+	editorconfig-checker -exclude '.*\.(so|dat|toif|der)|^crypto/aes/'
+
+cstyle_check: ## run code style check on low-level C code
+	clang-format --version
+	@echo [CLANG-FORMAT]
+	@./tools/clang-format-check $(C_FILES)
+
+cstyle: ## apply code style on low-level C code
+	@echo [CLANG-FORMAT]
+	@clang-format -i $(C_FILES)
+
+protostyle: ## Format protobuf definitions
+	@echo [PROTOBUF-STYLE]
+	@clang-format -i $(PROTO_FILES)
+
+protostyle_check: ## Check that protobuf definitions are properly formatted
+	@echo [PROTOBUF-STYLE-CHECK]
+	clang-format --version
+	@./tools/clang-format-check $(PROTO_FILES)
+
+defs_check: ## check validity of coin definitions and protobuf files
+	jsonlint common/defs/*.json common/defs/*/*.json
+	python3 common/tools/cointool.py check
+	python3 common/tools/support.py check
+	python3 common/protob/check.py
+	python3 common/protob/graph.py common/protob/*.proto
+
+ruststyle: ## apply code style on rust sources
+	@echo [RUSTFMT]
+	@cd core/embed ; cargo fmt
+	make -C rust style
+
+ruststyle_check: ## run code style check on rust sources
+	@echo [RUSTFMT]
+	@cd core/embed ; cargo fmt -- --check
+	make -C rust style_check
+
+
+typecheck: pyright
+
+pyright:
+	python ./tools/pyright_tool.py
+
+## code generation commands:
+
+mocks: ## generate mock python headers from C modules
+	./core/tools/build_mocks
+
+mocks_check: ## check validity of mock python headers
+	./core/tools/build_mocks --check
+	flake8 core/mocks/generated
+
+templates: icons ## rebuild coin lists from definitions in common
+	make -C core templates
+
+templates_check: ## check that coin lists are up to date
+	make -C core templates_check
+
+solana_templates: ## rebuild Solana instruction template file
+	python tools/build_solana_templates.py
+
+solana_templates_check: ## check that Solana instruction template file is up to date
+	python tools/build_solana_templates.py --check
+
+icons: ## generate FIDO service icons
+	python3 core/tools/build_icons.py
+
+icons_check: ## generate FIDO service icons
+	python3 core/tools/build_icons.py --check
+
+protobuf: ## generate python and rust protobuf headers
+	./tools/build_protobuf
+	./rust/trezor-client/scripts/build_protos
+
+protobuf_check: ## check that generated protobuf headers are up to date
+	./tools/build_protobuf --check
+	./rust/trezor-client/scripts/build_protos --check
+
+docs_summary_check: ## check if there are unlinked documentation files
+	@echo [DOCS-SUMMARY-MARKDOWN-CHECK]
+	python3 tools/check_docs_summary.py
+
+vendorheader: ## generate vendor header
+	./core/tools/generate_vendorheader.sh --quiet
+
+vendorheader_check: ## check that vendor header is up to date
+	./core/tools/generate_vendorheader.sh --quiet --check
+
+bootloader_hashes: ## generate bootloader hashes
+	bootloader_hashes
+
+bootloader_hashes_check: ## check generated bootloader hashes
+	bootloader_hashes --check
+
+lsgen: ## generate linker scripts
+	lsgen
+
+lsgen_check: ## check generated linker scripts
+	lsgen --check
+
+tropic_config:
+	./core/tools/generate_tropic_model_config.py
+	./core/tools/generate_tropic_config_docs.py
+
+tropic_config_check:
+	./core/tools/generate_tropic_model_config.py --check
+	./core/tools/generate_tropic_config_docs.py --check
+
+hsm_keys:
+	./core/tools/generate_hsm_keys.py
+
+hsm_keys_check:
+	./core/tools/generate_hsm_keys.py --check
+
+prodtest_error_codes: ## generate prodtest error codes JSON
+	python3 core/tools/prodtest_error_codes.py
+
+prodtest_error_codes_check: ## check prodtest error codes JSON is up to date
+	python3 core/tools/prodtest_error_codes.py --check
+
+certs:
+	./core/tools/generate_certificates.py
+
+certs_check:
+	./core/tools/generate_certificates.py --check
+
+python_doc: ## generate trezorctl OPTIONS.rst
+	make -C python doc
+
+python_doc_check: ## check that trezorctl OPTIONS.rst is up to date
+	make -C python doc_check
+
+gen:  templates mocks icons protobuf vendorheader solana_templates bootloader_hashes lsgen tropic_config hsm_keys prodtest_error_codes certs python_doc ## regenerate auto-generated files from sources
+
+gen_check: templates_check mocks_check icons_check protobuf_check vendorheader_check solana_templates_check bootloader_hashes_check lsgen_check tropic_config_check hsm_keys_check prodtest_error_codes_check certs_check python_doc_check ## check validity of auto-generated files
+
+uvlock_check: ## check that uv.lock is up to date
+	@echo [UVLOCK-CHECK]
+	uv lock --check

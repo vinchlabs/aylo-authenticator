@@ -1,0 +1,156 @@
+from typing import TYPE_CHECKING
+
+from trezor import protobuf, utils
+from trezor.crypto import hmac
+from trezor.messages import (
+    ThpAuthenticatedCredentialData,
+    ThpCredentialMetadata,
+    ThpHandshakeCompletionReqNoisePayload,
+    ThpPairingCredential,
+)
+from trezor.utils import truncate_utf8
+from trezor.wire.message_handler import wrap_protobuf_load
+from trezorthp import MAX_CREDENTIAL_LEN
+
+if TYPE_CHECKING:
+    from buffer_types import AnyBytes
+
+    from apps.common.paths import Slip21Path
+
+_THP_CREDENTIAL_KEY_PATH_PREFIX = [b"TREZOR", b"THP credential authentication key"]
+
+
+def derive_cred_auth_key() -> bytes:
+    """
+    Derive the current THP credential authentication mac-ing key from the device secret.
+    """
+    from storage.device import get_cred_auth_key_counter, get_device_secret
+
+    from apps.common.seed import Slip21Node
+
+    # Derive the key using SLIP-21 https://github.com/satoshilabs/slips/blob/master/slip-0021.md,
+    # the derivation path is m/"TREZOR"/"THP credential authentication key"/(counter 4-byte BE)
+
+    thp_secret = get_device_secret()
+    counter = get_cred_auth_key_counter()
+    path: Slip21Path = _THP_CREDENTIAL_KEY_PATH_PREFIX + [counter]
+
+    symmetric_key_node: Slip21Node = Slip21Node(thp_secret)
+    symmetric_key_node.derive_path(path)
+    cred_auth_key = symmetric_key_node.key()
+
+    return cred_auth_key
+
+
+def invalidate_cred_auth_key() -> None:
+    from storage.device import increment_cred_auth_key_counter
+
+    increment_cred_auth_key_counter()
+
+
+def issue_credential(
+    host_static_public_key: AnyBytes,
+    credential_metadata: ThpCredentialMetadata,
+) -> bytes:
+    """
+    Issue a pairing credential binded to the provided host static public key
+    and credential metadata.
+    """
+    # Truncate app_name and host_name to fit MAX_CREDENTIAL_LEN
+    if (
+        len(credential_metadata.app_name.encode())
+        + len(credential_metadata.host_name.encode())
+        > 80
+    ):
+        credential_metadata.host_name = truncate_utf8(credential_metadata.host_name, 40)
+    if (
+        len(credential_metadata.app_name.encode())
+        + len(credential_metadata.host_name.encode())
+        > 80
+    ):
+        credential_metadata.app_name = truncate_utf8(credential_metadata.app_name, 40)
+
+    cred_auth_key = derive_cred_auth_key()
+    proto_msg = ThpAuthenticatedCredentialData(
+        host_static_public_key=host_static_public_key,
+        cred_metadata=credential_metadata,
+    )
+    authenticated_credential_data = _encode_message_into_new_buffer(proto_msg)
+    mac = hmac(hmac.SHA256, cred_auth_key, authenticated_credential_data).digest()
+
+    proto_msg = ThpPairingCredential(cred_metadata=credential_metadata, mac=mac)
+    credential_raw = _encode_message_into_new_buffer(proto_msg)
+    if len(credential_raw) > MAX_CREDENTIAL_LEN:
+        raise ValueError("Credential too long")
+    return credential_raw
+
+
+def unwrap_credential(encoded_noise_payload: AnyBytes) -> AnyBytes | None:
+    expected_type = protobuf.type_for_name("ThpHandshakeCompletionReqNoisePayload")
+    msg = wrap_protobuf_load(encoded_noise_payload, expected_type, is_message=False)
+    if not ThpHandshakeCompletionReqNoisePayload.is_type_of(msg):
+        raise TypeError
+    return msg.host_pairing_credential
+
+
+def decode_credential(
+    encoded_pairing_credential_message: AnyBytes,
+) -> ThpPairingCredential:
+    """
+    Decode a protobuf encoded pairing credential.
+    """
+    expected_type = protobuf.type_for_name("ThpPairingCredential")
+    credential = wrap_protobuf_load(
+        encoded_pairing_credential_message, expected_type, is_message=False
+    )
+    if not ThpPairingCredential.is_type_of(credential):
+        raise TypeError
+    return credential
+
+
+def validate_credential(
+    credential: ThpPairingCredential,
+    host_static_public_key: AnyBytes,
+) -> bool:
+    """
+    Validate a pairing credential binded to the provided host static public key.
+    """
+    cred_auth_key = derive_cred_auth_key()
+    proto_msg = ThpAuthenticatedCredentialData(
+        host_static_public_key=host_static_public_key,
+        cred_metadata=credential.cred_metadata,
+    )
+    authenticated_credential_data = _encode_message_into_new_buffer(proto_msg)
+    mac = hmac(hmac.SHA256, cred_auth_key, authenticated_credential_data).digest()
+
+    if len(mac) != len(credential.mac):
+        return False
+    return utils.consteq(mac, credential.mac)
+
+
+def decode_and_validate_credential(
+    encoded_pairing_credential_message: AnyBytes,
+    host_static_public_key: AnyBytes,
+) -> bool:
+    """
+    Decode a protobuf encoded pairing credential and validate it
+    binded to the provided host static public key.
+    """
+    credential = decode_credential(encoded_pairing_credential_message)
+    return validate_credential(credential, host_static_public_key)
+
+
+def is_credential_autoconnect(credential: ThpPairingCredential) -> bool:
+    assert ThpPairingCredential.is_type_of(credential)
+    if credential.cred_metadata is None:
+        return False
+    if credential.cred_metadata.autoconnect is None:
+        return False
+    return credential.cred_metadata.autoconnect
+
+
+def _encode_message_into_new_buffer(msg: protobuf.MessageType) -> bytes:
+    msg_len = protobuf.encoded_length(msg)
+    new_buffer = bytearray(msg_len)
+    protobuf.encode(new_buffer, msg)
+    return bytes(new_buffer)

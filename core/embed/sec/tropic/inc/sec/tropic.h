@@ -1,0 +1,199 @@
+/*
+ * This file is part of the Trezor project, https://trezor.io/
+ *
+ * Copyright (c) SatoshiLabs
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#ifdef USE_STORAGE
+#include <sec/storage.h>
+#endif
+#include <rtl/cli.h>
+#include <sec/tropic_configs.h>
+#include <trezor_types.h>
+
+#include "ed25519-donna/ed25519.h"
+
+// Max size of data slot fixed to 444 B for backwards compatibility. From
+// Tropic's (RISCV) FW version >=2.0.0, 475 B can be utilized from each slot.
+#define TROPIC_SLOT_MAX_SIZE_V1 (444)
+
+// FIDO attestation key and certificate.
+#define TROPIC_FIDO_CERT_FIRST_SLOT 0
+#define TROPIC_FIDO_CERT_SLOT_COUNT 3
+#define TROPIC_FIDO_KEY_SLOT 1  // ECC_SLOT_1
+
+// Device attestation key and certificate.
+#define TROPIC_DEVICE_CERT_FIRST_SLOT 3
+#define TROPIC_DEVICE_CERT_SLOT_COUNT 3
+#define TROPIC_DEVICE_KEY_SLOT 0  // ECC_SLOT_0
+
+// Slot reserved for the version of Tropic configuration.
+#define TROPIC_CONFIG_DISTRIBUTION_VERSION_SLOT 6
+// Slot reserved for the backup distribution version of Tropic configuration.
+#define TROPIC_CONFIG_BACKUP_DISTRIBUTION_VERSION_SLOT 7
+
+// Pairing key used by prodtest to inject the privileged and unprivileged
+// pairing keys.
+#define TROPIC_FACTORY_PAIRING_KEY_SLOT 0  // TR01_PAIRING_KEY_SLOT_INDEX_0
+
+// Pairing key used by the HSM to inject the attestation FIDO key and generate
+// the device key, and by unofficial firwmare.
+#define TROPIC_UNPRIVILEGED_PAIRING_KEY_SLOT 1  // TR01_PAIRING_KEY_SLOT_INDEX_1
+
+// Pairing key used by official firmware.
+#define TROPIC_PRIVILEGED_PAIRING_KEY_SLOT 2  // TR01_PAIRING_KEY_SLOT_INDEX_2
+
+// Mac-and-destroy slots used in PIN verification
+#define TROPIC_FIRST_MAC_AND_DESTROY_SLOT_PRIVILEGED 0
+#define TROPIC_FIRST_MAC_AND_DESTROY_SLOT_UNPRIVILEGED 64
+#define TROPIC_MAC_AND_DESTROY_SLOT_COUNT 64
+
+#define TROPIC_MAC_AND_DESTROY_SIZE 32
+
+#ifdef KERNEL_MODE
+
+#include "libtropic.h"
+
+lt_ret_t tropic_init(cli_t* cli);
+
+void tropic_deinit(void);
+
+#ifdef USE_TROPIC_LOGGING
+// Routes libtropic's `LT_LOG_*()` output to `cli`. Pass NULL to stop.
+void tropic_set_log_sink(cli_t* cli);
+#endif  // USE_TROPIC_LOGGING
+
+lt_handle_t* tropic_get_handle(void);
+
+typedef struct {
+  uint32_t distribution_version;
+  const lt_config_t* i_config;
+  const lt_config_t* min_r_config;
+  const lt_config_t* max_r_config;
+} tropic_expected_config_t;
+
+#ifdef TREZOR_PRODTEST
+lt_handle_t* tropic_prodtest_init_and_get_handle(cli_t* cli);
+
+lt_ret_t tropic_custom_session_start(cli_t* cli,
+                                     lt_pkey_index_t pairing_key_index);
+
+lt_ret_t tropic_session_invalidate(void);
+
+// Discards the session data without communicating with Tropic.
+void tropic_session_forget(void);
+
+bool tropic_get_pubkey(cli_t* cli, lt_handle_t* tropic_handle,
+                       curve25519_key pubkey);
+
+bool tropic_get_cert_chain_ptr(cli_t* cli, lt_handle_t* tropic_handle,
+                               uint8_t const** cert_chain,
+                               size_t* cert_chain_length);
+
+lt_ret_t lt_ecc_key_erase_retry(lt_handle_t* tropic_handle,
+                                const lt_ecc_slot_t ecc_slot);
+
+lt_ret_t lt_r_mem_data_erase_retry(lt_handle_t* tropic_handle,
+                                   const uint16_t udata_slot);
+
+lt_ret_t lt_mac_and_destroy_retry(lt_handle_t* tropic_handle,
+                                  const lt_mac_and_destroy_slot_t slot,
+                                  const uint8_t* data_out, uint8_t* data_in);
+
+lt_ret_t lt_read_whole_R_config_retry(lt_handle_t* tropic_handle,
+                                      lt_config_t* config);
+
+lt_ret_t lt_read_whole_I_config_retry(lt_handle_t* tropic_handle,
+                                      lt_config_t* config);
+
+lt_ret_t lt_erase_and_write_R_config_retry(lt_handle_t* tropic_handle,
+                                           const lt_config_t* config);
+
+bool tropic_get_expected_tropic_config_from_distribution_version(
+    uint32_t distribution_version, tropic_expected_config_t* config_out);
+
+#endif  // TREZOR_PRODTEST
+
+#endif  // KERNEL_MODE
+
+secbool tropic_ensure_configuration(void);
+
+typedef secbool (*tropic_ui_progress_t)(void);
+
+void tropic_get_factory_privkey(curve25519_key privkey);
+
+bool tropic_ping(const uint8_t* msg_out, uint8_t* msg_in, uint16_t msg_len);
+
+bool tropic_ecc_key_generate(uint16_t slot_index);
+
+bool tropic_ecc_sign(uint16_t key_slot_index, const uint8_t* dig,
+                     uint16_t dig_len, uint8_t* sig);
+
+bool tropic_data_read(uint16_t udata_slot, uint8_t* data, uint16_t* size);
+
+bool tropic_data_multi_size(uint16_t first_slot, size_t* data_length);
+
+bool tropic_data_multi_read(uint16_t first_slot, uint16_t slot_count,
+                            uint8_t* data, size_t max_data_length,
+                            size_t* data_length);
+
+bool tropic_random_buffer(void* buffer, size_t length);
+
+void tropic_random_buffer_time(uint32_t* time_ms);
+
+#ifdef TREZOR_EMULATOR
+void tropic_random_reseed(uint32_t seed);
+bool tropic_session_start(void);
+#endif
+
+#ifdef USE_STORAGE
+void tropic_session_start_time(uint32_t* time_ms);
+
+bool tropic_pin_stretch(tropic_ui_progress_t ui_progress, uint16_t pin_index,
+                        uint8_t stretched_pin[TROPIC_MAC_AND_DESTROY_SIZE]);
+
+void tropic_pin_stretch_time(uint32_t* time_ms);
+
+bool tropic_pin_reset_slots(
+    tropic_ui_progress_t ui_progress, uint16_t pin_index,
+    const uint8_t reset_key[TROPIC_MAC_AND_DESTROY_SIZE]);
+
+void tropic_pin_reset_slots_time(uint32_t* time_ms, uint16_t pin_index);
+
+bool tropic_pin_set(
+    tropic_ui_progress_t ui_progress,
+    uint8_t stretched_pins[PIN_MAX_TRIES][TROPIC_MAC_AND_DESTROY_SIZE],
+    uint8_t reset_key[TROPIC_MAC_AND_DESTROY_SIZE]);
+
+void tropic_pin_set_time(uint32_t* time_ms);
+
+bool tropic_pin_set_kek_masks(
+    tropic_ui_progress_t ui_progress,
+    const uint8_t kek[TROPIC_MAC_AND_DESTROY_SIZE],
+    const uint8_t stretched_pins[PIN_MAX_TRIES][TROPIC_MAC_AND_DESTROY_SIZE]);
+
+void tropic_pin_set_kek_masks_time(uint32_t* time_ms);
+
+bool tropic_pin_unmask_kek(
+    tropic_ui_progress_t ui_progress, uint16_t pin_index,
+    const uint8_t stretched_pin[TROPIC_MAC_AND_DESTROY_SIZE],
+    uint8_t kek[TROPIC_MAC_AND_DESTROY_SIZE]);
+
+void tropic_pin_unmask_kek_time(uint32_t* time_ms);
+
+#endif

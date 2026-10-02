@@ -1,0 +1,18 @@
+[book]
+title = "Trezor Firmware"
+description = "Documentation of Trezor Firmware."
+src = "."
+
+[build]
+build-dir = "mdbook"
+create-missing = false
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output]
+
+[output.html]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]

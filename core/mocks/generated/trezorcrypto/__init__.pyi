@@ -1,0 +1,487 @@
+from typing import *
+from buffer_types import *
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-aes.h
+class aes:
+    """
+    AES context.
+    """
+    ECB: int
+    CBC: int
+    CFB: int
+    OFB: int
+    CTR: int
+
+    def __init__(
+        self,
+        mode: int,
+        key: AnyBytes,
+        iv: AnyBytes | None = None,
+    ) -> None:
+        """
+        Initialize AES context.
+        """
+
+    def encrypt(self, data: AnyBytes) -> bytes:
+        """
+        Encrypt data and update AES context.
+        """
+
+    def decrypt(self, data: AnyBytes) -> bytes:
+        """
+        Decrypt data and update AES context.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-aesgcm.h
+class aesgcm_encrypt:
+    """
+    AES-GCM context for encryption.
+    """
+
+    def __init__(self, key: AnyBytes, iv: AnyBytes) -> None:
+        """
+        Initialize the AES-GCM context for encryption.
+        """
+
+    def auth(self, data: AnyBytes) -> None:
+        """
+        Include authenticated data chunk in the GCM authentication tag. This can
+        be called repeatedly to add authenticated data at any point before
+        finish().
+        """
+
+    def reset(self, iv: AnyBytes) -> None:
+        """
+        Reset the IV for encryption.
+        """
+
+    def encrypt(self, data: AnyBytes) -> bytes:
+        """
+        Encrypt data chunk.
+        """
+
+    def encrypt_in_place(self, data: AnyBuffer) -> int:
+        """
+        Encrypt data chunk in place. Returns the length of the encrypted data.
+        """
+
+    def finish(self) -> bytes:
+        """
+        Compute the GCM authentication tag.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-aesgcm.h
+class aesgcm_decrypt:
+    """
+    AES-GCM context for decryption.
+    """
+
+    def __init__(self, key: AnyBytes, iv: AnyBytes) -> None:
+        """
+        Initialize the AES-GCM context for decryption.
+        """
+
+    def auth(self, data: AnyBytes) -> None:
+        """
+        Include authenticated data chunk in the GCM authentication tag. This can
+        be called repeatedly to add authenticated data at any point before
+        finish().
+        """
+
+    def reset(self, iv: AnyBytes) -> None:
+        """
+        Reset the IV for decryption.
+        """
+
+    def decrypt(self, data: AnyBytes) -> bytes:
+        """
+        Decrypt data chunk.
+        """
+
+    def decrypt_in_place(self, data: AnyBuffer) -> int:
+        """
+        Decrypt data chunk in place. Returns the length of the decrypted data.
+        """
+
+    def finish(self, expected_tag: AnyBytes) -> None:
+        """
+        Verify the GCM authentication tag.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-blake256.h
+class blake256:
+    """
+    Blake256 context.
+    """
+    block_size: int
+    digest_size: int
+
+    def __init__(self, __data: StrOrBytes | None = None) -> None:
+        """
+        Creates a hash context object.
+        """
+
+    def update(self, __data: StrOrBytes) -> None:
+        """
+        Update the hash context with hashed data.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Returns the digest of hashed data.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-blake2b.h
+class blake2b:
+    """
+    Blake2b context.
+    """
+    block_size: int
+    digest_size: int
+
+    def __init__(
+        self,
+        data: AnyBytes | None = None,
+        outlen: int = blake2b.digest_size,
+        key: AnyBytes | None = None,
+        personal: AnyBytes | None = None,
+    ) -> None:
+        """
+        Creates a hash context object.
+        """
+
+    def update(self, __data: StrOrBytes) -> None:
+        """
+        Update the hash context with hashed data.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Returns the digest of hashed data.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-blake2s.h
+class blake2s:
+    """
+    Blake2s context.
+    """
+    block_size: int
+    digest_size: int
+
+    def __init__(
+        self,
+        data: AnyBytes | None = None,
+        outlen: int = blake2s.digest_size,
+        key: AnyBytes | None = None,
+        personal: AnyBytes | None = None,
+    ) -> None:
+        """
+        Creates a hash context object.
+        """
+
+    def update(self, __data: StrOrBytes) -> None:
+        """
+        Update the hash context with hashed data.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Returns the digest of hashed data.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-chacha20poly1305.h
+class chacha20poly1305_encrypt:
+    """
+    ChaCha20Poly1305 context for encryption.
+    """
+
+    def __init__(self, key: AnyBytes, nonce: AnyBytes) -> None:
+        """
+        Initialize the ChaCha20 + Poly1305 context for encryption
+        using a 32 byte key and 12 byte nonce as in the RFC 7539 style.
+        """
+
+    def auth(self, data: AnyBytes) -> None:
+        """
+        Include authenticated data in the Poly1305 MAC using the RFC 7539
+        style with 16 byte padding. This must only be called once and prior
+        to encryption.
+        """
+
+    def encrypt(self, data: AnyBytes) -> bytes:
+        """
+        Encrypt data (length of data must be divisible by 64 except for the
+        final value).
+        """
+
+    def finish(self) -> bytes:
+        """
+        Compute RFC 7539-style Poly1305 MAC.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-chacha20poly1305.h
+class chacha20poly1305_decrypt:
+    """
+    ChaCha20Poly1305 context for decryption.
+    """
+
+    def __init__(self, key: AnyBytes, nonce: AnyBytes) -> None:
+        """
+        Initialize the ChaCha20 + Poly1305 context for decryption
+        using a 32 byte key and 12 byte nonce as in the RFC 7539 style.
+        """
+
+    def auth(self, data: AnyBytes) -> None:
+        """
+        Include authenticated data in the Poly1305 MAC using the RFC 7539
+        style with 16 byte padding. This must only be called once and prior
+        to decryption.
+        """
+
+    def decrypt(self, data: AnyBytes) -> bytes:
+        """
+        Decrypt data (length of data must be divisible by 64 except for the
+        final value).
+        """
+
+    def finish(self, expected_mac: AnyBytes) -> None:
+        """
+        Verify RFC 7539-style Poly1305 MAC.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-common.h
+class AuthenticationError(Exception):
+    """
+    Authentication failed.
+    """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-groestl.h
+class groestl512:
+    """
+    GROESTL512 context.
+    """
+    block_size: int
+    digest_size: int
+
+    def __init__(self, __data: StrOrBytes | None = None) -> None:
+        """
+        Creates a hash context object.
+        """
+
+    def update(self, __data: StrOrBytes) -> None:
+        """
+        Update the hash context with hashed data.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Returns the digest of hashed data.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-hmac.h
+class hmac:
+    """
+    HMAC context.
+    """
+    SHA256: int
+    SHA512: int
+
+    def __init__(
+        self,
+        hashtype: int,
+        key: AnyBytes,
+        message: AnyBytes | None = None,
+    ) -> None:
+        """
+        Create a HMAC context.
+        """
+
+    def update(self, message: AnyBytes) -> None:
+        """
+        Update a HMAC context.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Return the digest of processed data so far.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-pbkdf2.h
+class pbkdf2:
+    """
+    PBKDF2 context.
+    """
+    HMAC_SHA256: int
+    HMAC_SHA512: int
+
+    def __init__(
+        self,
+        prf: int,
+        password: AnyBytes,
+        salt: AnyBytes,
+        iterations: int | None = None,
+        blocknr: int = 1,
+    ) -> None:
+        """
+        Create a PBKDF2 context.
+        """
+
+    def update(self, iterations: int) -> None:
+        """
+        Update a PBKDF2 context.
+        """
+
+    def key(self) -> bytes:
+        """
+        Retrieve derived key.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-ripemd160.h
+class ripemd160:
+    """
+    RIPEMD160 context.
+    """
+    block_size: int
+    digest_size: int
+
+    def __init__(self, __data: StrOrBytes | None = None) -> None:
+        """
+        Creates a hash context object.
+        """
+
+    def update(self, __data: StrOrBytes) -> None:
+        """
+        Update the hash context with hashed data.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Returns the digest of hashed data.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-sha256.h
+class sha256:
+    """
+    SHA256 context.
+    """
+    block_size: int
+    digest_size: int
+
+    def __init__(self, __data: StrOrBytes | None = None) -> None:
+        """
+        Creates a hash context object.
+        """
+
+    def update(self, __data: StrOrBytes) -> None:
+        """
+        Update the hash context with hashed data.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Returns the digest of hashed data.
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-sha3-256.h
+class sha3_256:
+    """
+    SHA3_256 context.
+    """
+    block_size: int
+    digest_size: int
+
+    def __init__(
+        self,
+        data: AnyBytes | None = None,
+        keccak: bool = False,
+    ) -> None:
+        """
+        Creates a hash context object.
+        """
+
+    def update(self, __data: StrOrBytes) -> None:
+        """
+        Update the hash context with hashed data.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Returns the digest of hashed data.
+        """
+
+    def copy(self) -> sha3_256:
+        """
+        Returns the copy of the digest object with the current state
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-sha3-512.h
+class sha3_512:
+    """
+    SHA3_512 context.
+    """
+    block_size: int
+    digest_size: int
+
+    def __init__(
+        self,
+        data: AnyBytes | None = None,
+        keccak: bool = False,
+    ) -> None:
+        """
+        Creates a hash context object.
+        """
+
+    def update(self, __data: StrOrBytes) -> None:
+        """
+        Update the hash context with hashed data.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Returns the digest of hashed data.
+        """
+
+    def copy(self) -> sha3_512:
+        """
+        Returns the copy of the digest object with the current state
+        """
+
+
+# upymod/modtrezorcrypto/modtrezorcrypto-sha512.h
+class sha512:
+    """
+    SHA512 context.
+    """
+    block_size: int
+    digest_size: int
+
+    def __init__(self, __data: StrOrBytes | None = None) -> None:
+        """
+        Creates a hash context object.
+        """
+
+    def update(self, __data: StrOrBytes) -> None:
+        """
+        Update the hash context with hashed data.
+        """
+
+    def digest(self) -> bytes:
+        """
+        Returns the digest of hashed data.
+        """

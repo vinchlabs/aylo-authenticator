@@ -1,0 +1,271 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import time
+from collections.abc import Generator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
+
+import pytest
+
+from trezorlib import device, exceptions, messages
+
+from ..common import MNEMONIC12, LayoutType, MNEMONIC_SLIP39_BASIC_20_3of6
+from . import recovery
+from .common import go_next
+from .test_autolock import PIN4, set_autolock_delay, unlock_dry_run
+
+if TYPE_CHECKING:
+    from trezorlib.debuglink import DebugLink
+    from trezorlib.testing.device_handler import BackgroundDeviceHandler
+
+
+pytestmark = pytest.mark.models("core")
+
+
+@contextmanager
+def prepare_recovery_and_evaluate(
+    device_handler: "BackgroundDeviceHandler",
+) -> Generator["DebugLink", None, None]:
+    features = device_handler.features()
+    debug = device_handler.debuglink()
+    assert features.initialized is False
+    session = device_handler.client.get_seedless_session()
+    device_handler.run_with_provided_session(
+        session, device.recover, pin_protection=False
+    )  # type: ignore
+
+    yield debug
+
+    device_handler.result()
+
+    features = device_handler.features()
+    assert features.initialized is True
+    assert features.recovery_status == messages.RecoveryStatus.Nothing
+
+
+@contextmanager
+def prepare_recovery_and_evaluate_cancel(
+    device_handler: "BackgroundDeviceHandler",
+) -> Generator["DebugLink", None, None]:
+    features = device_handler.features()
+    debug = device_handler.debuglink()
+    assert features.initialized is False
+    session = device_handler.client.get_seedless_session()
+    device_handler.run_with_provided_session(
+        session, device.recover, pin_protection=False
+    )  # type: ignore
+
+    yield debug
+
+    with pytest.raises(exceptions.Cancelled):
+        device_handler.result()
+
+    features = device_handler.features()
+    assert features.initialized is False
+    assert features.recovery_status == messages.RecoveryStatus.Nothing
+
+
+@pytest.mark.setup_client(uninitialized=True)
+def test_recovery_slip39_basic(device_handler: "BackgroundDeviceHandler"):
+    with prepare_recovery_and_evaluate(device_handler) as debug:
+        recovery.confirm_recovery(debug)
+        recovery.select_number_of_words(debug)
+        recovery.enter_shares(debug, MNEMONIC_SLIP39_BASIC_20_3of6)
+        recovery.finalize(debug)
+
+
+@pytest.mark.setup_client(uninitialized=True)
+@pytest.mark.models(
+    "eckhart",
+    reason="Other core models do not support returning from the MenemonicKeyboard",
+)
+def test_recovery_slip39_reenter_second(device_handler: "BackgroundDeviceHandler"):
+    with prepare_recovery_and_evaluate(device_handler) as debug:
+        recovery.confirm_recovery(debug)
+        recovery.select_number_of_words(debug)
+        # Enter the 1st share
+        recovery.enter_shares(
+            debug, [MNEMONIC_SLIP39_BASIC_20_3of6[0]], after_layout_text=None
+        )
+        recovery.check_share_success(debug, 0, MNEMONIC_SLIP39_BASIC_20_3of6)
+        # Enter several words of the 2nd share
+        recovery.enter_share(debug, "extra extend")
+        # Remove the entered words
+        recovery.go_back_from_mnemonic(debug)
+        # Make sure the success screen of the 1st share is shown
+        recovery.check_share_success(debug, 0, MNEMONIC_SLIP39_BASIC_20_3of6)
+        # Enter remaining shares
+        recovery.enter_shares(debug, MNEMONIC_SLIP39_BASIC_20_3of6[1:], start_idx=1)
+        recovery.finalize(debug)
+
+
+@pytest.mark.setup_client(uninitialized=True)
+def test_recovery_cancel_number_of_words(device_handler: "BackgroundDeviceHandler"):
+    with prepare_recovery_and_evaluate_cancel(device_handler) as debug:
+        recovery.confirm_recovery(debug)
+        recovery.cancel_select_number_of_words(debug)
+
+
+@pytest.mark.setup_client(uninitialized=True)
+def test_recovery_bip39(device_handler: "BackgroundDeviceHandler"):
+    with prepare_recovery_and_evaluate(device_handler) as debug:
+        recovery.confirm_recovery(debug)
+        recovery.select_number_of_words(debug, num_of_words=12)
+        recovery.enter_seed(debug, MNEMONIC12.split())
+        recovery.finalize(debug)
+
+
+@pytest.mark.setup_client(uninitialized=True)
+@pytest.mark.models(
+    "eckhart",
+    reason="Other core models do not support returning from the MenemonicKeyboard",
+)
+def test_recovery_bip39_reenter(
+    device_handler: "BackgroundDeviceHandler",
+):
+    with prepare_recovery_and_evaluate(device_handler) as debug:
+        recovery.confirm_recovery(debug)
+        # Select wrong number of words
+        recovery.select_number_of_words(debug, num_of_words=20)
+        # Enter several wrong words
+        recovery.enter_seed(
+            debug, MNEMONIC12.split()[3:4], after_layout_text="recovery__start_entering"
+        )
+        # Remove the words and go back to number of words selection
+        recovery.go_back_from_mnemonic(debug)
+        # Select correct number of words
+        recovery.select_number_of_words(debug, num_of_words=12)
+        # Enter the seed
+        recovery.enter_seed(debug, MNEMONIC12.split())
+        recovery.finalize(debug)
+
+
+@pytest.mark.setup_client(uninitialized=True)
+def test_recovery_bip39_previous_word(device_handler: "BackgroundDeviceHandler"):
+    with prepare_recovery_and_evaluate(device_handler) as debug:
+        recovery.confirm_recovery(debug)
+        recovery.select_number_of_words(debug, num_of_words=12)
+        seed_words: list[str] = MNEMONIC12.split()
+        bad_indexes = {1: seed_words[-1], 7: seed_words[0]}
+        recovery.enter_seed_previous_correct(debug, seed_words, bad_indexes)
+        recovery.finalize(debug)
+
+
+@pytest.mark.protocol("v1")
+def test_recovery_cancel_issue4613(device_handler: "BackgroundDeviceHandler"):
+    """Test for issue fixed in PR #4613: After aborting the recovery flow from host
+    side, it was impossible to exit recovery until device was restarted."""
+
+    debug = device_handler.debuglink()
+
+    # initiate and confirm the recovery
+    session = device_handler.client.get_seedless_session()
+    device_handler.run_with_provided_session(
+        session, device.recover, type=messages.RecoveryType.DryRun
+    )
+    title = (
+        "reset__check_wallet_backup_title"
+        if device_handler.debuglink().layout_type is LayoutType.Eckhart
+        else "recovery__title_dry_run"
+    )
+    recovery.confirm_recovery(debug, title=title)
+    # select number of words
+    recovery.select_number_of_words(debug, num_of_words=12)
+    # abort the process running the recovery from host
+    device_handler.kill_task()
+
+    # Now Trezor is hanging, waiting for user interaction, but nobody is communicating
+    # from the host side.
+
+    # Reopen client and debuglink, closed by kill_task
+    device_handler.client.transport.open()
+    debug = device_handler.debuglink()
+
+    # Ping the Trezor with an Initialize message (listed in DO_NOT_RESTART)
+    try:
+        features = session.call(messages.Initialize())
+    except exceptions.Cancelled:
+        # due to a related problem, the first call in this situation will return
+        # a Cancelled failure. This test does not care, we just retry.
+        features = session.call(messages.Initialize())
+
+    assert features.recovery_status == messages.RecoveryStatus.Recovery
+    # Trezor is sitting in recovery_homescreen now, waiting for the user to select
+    # number of words
+    recovery.select_number_of_words(debug, num_of_words=12)
+    # Trezor is waiting at "enter any word" screen, which has a Cancel button
+    recovery.cancel_recovery(debug)
+
+    # We should be back at homescreen
+    layout = debug.read_layout()
+    assert layout.main_component() == "Homescreen"
+    features = device_handler.client.refresh_features()
+    assert features.recovery_status == messages.RecoveryStatus.Nothing
+
+
+@pytest.mark.models(skip=["legacy", "safe3"])
+@pytest.mark.setup_client(pin=PIN4)
+def test_recovery_slip39_issue5306(device_handler: "BackgroundDeviceHandler"):
+    """Test for issue fixed in PR #5306: After tapping the key more times
+    than its length, there was an internal error UF."""
+
+    set_autolock_delay(device_handler, 10_000)
+    debug = device_handler.debuglink()
+
+    session = device_handler.client.get_seedless_session()
+    device_handler.run_with_provided_session(
+        session, device.recover, type=messages.RecoveryType.DryRun
+    )
+
+    unlock_dry_run(debug)
+
+    # select 20 words
+    recovery.select_number_of_words(debug, 20)
+
+    # go to mnemonic keyboard
+    if debug.layout_type in (LayoutType.Bolt, LayoutType.Delizia, LayoutType.Eckhart):
+        layout = go_next(debug)
+        assert layout.main_component() == "MnemonicKeyboard"
+    elif debug.layout_type is LayoutType.Caesar:
+        debug.press_right()
+        layout = debug.read_layout()
+        assert "MnemonicKeyboard" in layout.all_components()
+    else:
+        raise ValueError(f"Unsupported layout type: {debug.layout_type}")
+
+    # click the first key multiple times (more times than its length) to trigger the issue
+    coords = list(debug.button_actions.type_word("a", is_slip39=True))
+    for _ in range(3):
+        debug.click(coords[0])
+
+    # Make sure, the keyboard did not crash
+    layout = debug.read_layout()
+    if debug.layout_type in (LayoutType.Bolt, LayoutType.Delizia, LayoutType.Eckhart):
+        assert layout.main_component() == "MnemonicKeyboard"
+    elif debug.layout_type is LayoutType.Caesar:
+        assert "MnemonicKeyboard" in layout.all_components()
+    else:
+        raise ValueError(f"Unsupported layout type: {debug.layout_type}")
+
+    # wait for the keyboard to lock
+    time.sleep(10.1)
+    if debug.layout_type is LayoutType.Eckhart:
+        assert debug.read_layout().main_component() == "Homescreen"
+    else:
+        assert debug.read_layout().main_component() == "Lockscreen"
+    with pytest.raises(exceptions.Cancelled):
+        device_handler.result()

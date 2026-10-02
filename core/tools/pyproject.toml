@@ -1,0 +1,31 @@
+[project]
+name = "trezor_core_tools"
+version = "0.1.4"
+description = "Collection of CLI tools for trezor-core development"
+authors = [{ name = "matejcik", email = "jan.matejek@satoshilabs.com" }]
+requires-python = ">=3.11,<4"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+dependencies = ["trezor>=0.14,<0.15"]
+
+[project.scripts]
+headertool = "trezor_core_tools.headertool:cli"
+headertool_pq = "trezor_core_tools.headertool_pq:cli"
+xtask = "trezor_core_tools.xtask:main"
+layout_parser = "trezor_core_tools.layout_parser:main"
+lsgen = "trezor_core_tools.lsgen:main"
+hash_signer = "trezor_core_tools.hash_signer:main"
+combine_firmware = "trezor_core_tools.combine_firmware:main"
+bootloader_hashes = "trezor_core_tools.bootloader_hashes:main"
+verify_signed_firmware = "trezor_core_tools.verify_signed_firmware:main"
+
+[build-system]
+requires = ["flit_core >= 3.11,<5"]
+build-backend = "flit_core.buildapi"
+
+[tool.uv]
+package = true
+exclude-newer = "30 days"
+
+[tool.uv.sources]
+trezor = { path = "../../python", editable = true }

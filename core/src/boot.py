@@ -1,0 +1,165 @@
+# isort:skip_file
+
+import utime
+
+# Welcome screen is shown immediately after display init.
+# Then it takes about 120ms to get here.
+# (display is also prepared on that occasion).
+# Remembering time to control how long we show it.
+welcome_screen_start_ms = utime.ticks_ms()
+
+import storage
+import storage.device
+
+from trezor import config, io, log, loop, ui, utils, wire, translations
+from trezor.pin import (
+    allow_all_loader_messages,
+    ignore_nonpin_loader_messages,
+    show_pin_timeout,
+)
+from trezor.ui.layouts.homescreen import run_lockscreen
+
+from apps.common.request_pin import verify_user_pin
+from apps.common import lock_manager
+
+if utils.USE_OPTIGA:
+    from trezor.crypto import optiga
+
+if utils.USE_POWER_MANAGER:
+    from micropython import const
+    from trezor import workflow
+
+# have to use "==" over "in (list)" so that it can be statically replaced
+# with the correct value during the build process
+if (  # pylint: disable-next=consider-using-in
+    utils.INTERNAL_MODEL == "T2T1"
+    or utils.INTERNAL_MODEL == "T2B1"
+    or utils.INTERNAL_MODEL == "T3B1"
+):
+    _WELCOME_SCREEN_MS = 1000  # how long do we want to show welcome screen (minimum)
+else:
+    _WELCOME_SCREEN_MS = 0
+
+
+def enforce_welcome_screen_duration() -> None:
+    """Make sure we will show the welcome screen for appropriate amount of time."""
+    # Not wasting the time in emulator debug builds (debugging and development)
+    if __debug__ and utils.EMULATOR:
+        return
+    while (
+        utime.ticks_diff(utime.ticks_ms(), welcome_screen_start_ms) < _WELCOME_SCREEN_MS
+    ):
+        utime.sleep_ms(100)
+
+
+if not utils.USE_POWER_MANAGER:
+
+    async def pin_unlock_sequence() -> None:
+        await run_lockscreen(label=storage.device.get_label(), bootscreen=True)
+        await verify_user_pin()
+
+else:
+    _SUSPEND_MARKER: int = const(1)
+
+    async def wait_for_suspend() -> int:
+        lock_manager.notify_bootscreen.clear()
+        await lock_manager.notify_bootscreen
+        return _SUSPEND_MARKER
+
+    async def pin_unlock_sequence() -> None:
+        while True:
+            await run_lockscreen(label=storage.device.get_label(), bootscreen=True)
+            res = await loop.race(verify_user_pin(), wait_for_suspend())
+            if res is _SUSPEND_MARKER:
+                # make some delay for the suspend
+                await loop.sleep(100)
+                continue
+            return
+
+
+async def bootscreen() -> None:
+    """Sequence of actions to be done on boot (after device is connected).
+
+    We are starting with welcome_screen on the screen and want to show it
+    for at least _WELCOME_SCREEN_MS before any other screen.
+
+    Any non-PIN loaders are ignored during this function.
+    Allowing all of them before returning.
+    """
+    if utils.USE_POWER_MANAGER:
+        lock_manager.configure_autodim()
+        lock_manager.configure_autolock()
+
+    while True:
+        try:
+            if lock_manager.can_lock_device():
+                enforce_welcome_screen_duration()
+                if utils.INTERNAL_MODEL == "T2T1":
+                    ui.backlight_fade(ui.BacklightLevels.NONE)
+                ui.display.orientation(storage.device.get_rotation())
+                if utils.USE_TOUCH_WAKEUP:
+                    io.touch.touch_wakeup_set_enabled(storage.device.get_tap_to_wake())
+                if utils.USE_HAPTIC:
+                    io.haptic.haptic_set_enabled(storage.device.get_haptic_feedback())
+                if utils.USE_RGB_LED:
+                    io.rgb_led.rgb_led_set_enabled(storage.device.get_rgb_led())
+                await pin_unlock_sequence()
+                storage.init_unlocked()
+                allow_all_loader_messages()
+                break
+            else:
+                # Even if PIN is not configured, storage needs to be unlocked, unless it has just been initialized.
+                if not config.is_unlocked():
+                    await verify_user_pin()
+                storage.init_unlocked()
+                enforce_welcome_screen_duration()
+                rotation = storage.device.get_rotation()
+                if utils.USE_TOUCH_WAKEUP:
+                    io.touch.touch_wakeup_set_enabled(storage.device.get_tap_to_wake())
+                if utils.USE_HAPTIC:
+                    io.haptic.haptic_set_enabled(storage.device.get_haptic_feedback())
+                if utils.USE_RGB_LED:
+                    io.rgb_led.rgb_led_set_enabled(storage.device.get_rgb_led())
+
+                if rotation != ui.display.orientation():
+                    # there is a slight delay before next screen is shown,
+                    # so we don't fade unless there is a change of orientation
+                    if utils.INTERNAL_MODEL == "T2T1":
+                        ui.backlight_fade(ui.BacklightLevels.NONE)
+                    ui.display.orientation(rotation)
+                allow_all_loader_messages()
+                break
+        except wire.PinCancelled:
+            # verify_user_pin will convert a SdCardUnavailable (in case of sd salt)
+            # to PinCancelled exception.
+            # Ignore exception, retry loop.
+            pass
+        except BaseException as e:
+            # other exceptions here are unexpected and should halt the device
+            if __debug__:
+                log.exception(__name__, e)
+            utils.halt(e.__class__.__name__)
+
+    if utils.USE_POWER_MANAGER:
+        workflow.idle_timer.clear()
+    loop.clear()
+
+
+# Display emulator warning.
+if utils.EMULATOR:
+    print("\x1b[1;31m*** TREZOR EMULATOR IS FOR DEVELOPMENT PURPOSES ONLY ***\x1b[0m")
+
+# Ignore all automated PIN messages in the boot-phase (turned off in `bootscreen()`), unless Optiga throttling delays are active.
+if not utils.USE_OPTIGA or (optiga.get_sec() or 0) < 150:
+    ignore_nonpin_loader_messages()
+
+config.init(show_pin_timeout)
+translations.init()
+if utils.USE_POWER_MANAGER:
+    lock_manager.boot()
+
+if __debug__ and not utils.EMULATOR:
+    config.wipe()
+
+loop.schedule(bootscreen())
+loop.run()

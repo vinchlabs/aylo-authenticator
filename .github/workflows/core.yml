@@ -1,0 +1,1023 @@
+name: Core
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize  # branch head update
+      - labeled
+  workflow_dispatch:
+  schedule:
+    - cron: '15 23 * * *'  # every day @ 23:15
+  push:
+    branches:
+      - 'release/**'
+      - 'secfix/**'
+
+# cancel any previous runs on the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write       # for fetching the OIDC token
+  contents: read        # for actions/checkout
+  pull-requests: write  # for dflook comments on PR
+
+env:
+  SDL_VIDEODRIVER: dummy
+  PULL_COMMENT_PATH: ${{ github.workspace }}/tests/core-pull-comment.md
+  TREZOR_PYTEST_LOGS_DIR: ${{ github.workspace }}/tests/
+
+jobs:
+  param:
+    name: Determine pipeline parameters
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      test_lang: ${{ steps.set_vars.outputs.test_lang }}
+      asan: ${{ steps.set_vars.outputs.asan }}
+    steps:
+      - id: set_vars
+        name: Set variables
+        run: |
+          echo test_lang=${{ (github.event_name == 'schedule' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'translations'))) && '[\"en\", \"cs\", \"fr\", \"de\", \"es\", \"id\", \"pt\"]' || '[\"en\"]' }} >> $GITHUB_OUTPUT
+          # TODO: fix ASAN tests on nightly CI runs (#5143)
+          echo asan=${{ '[\"noasan\"]' }} >> $GITHUB_OUTPUT
+          cat $GITHUB_OUTPUT
+
+  core_build_tools_test:
+    name: Rust build-tool tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "cd core/embed && cargo test -p xtask -p xbuild"
+      - run: nix-shell --run "cd core/embed && cargo clippy -p xtask -p xbuild --all-targets -- -D warnings"
+
+  core_firmware:
+    name: Build firmware (${{ matrix.model }}, ${{ matrix.coins }}, ${{ matrix.type }}${{ matrix.miniscript && ', miniscript' || '' }}${{matrix.n1w1 && ', n1w1' || '' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        model: ${{ fromJSON(github.event_name == 'push' && '["T2B1", "T2T1", "T3B1", "T3T1", "T3W1"]' || '["T2T1", "T3B1", "T3T1", "T3W1"]') }}
+        coins: [universal, btconly]
+        type: ${{ fromJSON(github.event_name == 'schedule' && '["normal", "debuglink", "production"]' || '["normal", "debuglink"]') }}
+        miniscript: [false]
+        n1w1: [false]
+        include:
+          - model: D001
+            coins: universal
+            type: normal
+          - model: T2B1
+            coins: universal
+            type: normal
+          - model: T2B1
+            coins: btconly
+            type: normal
+          - model: T3T1
+            coins: btconly
+            type: debuglink
+            miniscript: true  # currently Miniscript is not supported for universal builds
+          - model: T3W1
+            coins: universal
+            type: debuglink
+            n1w1: true  # currently N1W1 is not supported for normal builds
+        exclude:
+          - model: T3W1
+            type: production
+    env:
+      TREZOR_MODEL: ${{ matrix.model }}
+      BITCOIN_ONLY: ${{ matrix.coins == 'universal' && '0' || '1' }}
+      PYOPT: ${{ matrix.type == 'debuglink' && '0' || '1' }}
+      MINISCRIPT: ${{ matrix.miniscript && '1' || '0' }}
+      N1W1: ${{ matrix.n1w1 && '1' || '0' }}
+      PRODUCTION: ${{ matrix.type == 'production' && '1' || '0' }}
+      BOOTLOADER_DEVEL: ${{ matrix.model == 'T3W1' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - if: matrix.coins == 'universal' && matrix.type != 'debuglink'
+        run: |
+          nix-shell --run "uv run make -C core build_boardloader"
+          nix-shell --run "uv run ./tools/check-insecure-prng.py --absent core/build-xtask/artifacts/latest/boardloader.bin"
+          nix-shell --run "uv run make -C core build_bootloader"
+          nix-shell --run "uv run ./tools/check-insecure-prng.py --absent core/build-xtask/artifacts/latest/bootloader.bin"
+          nix-shell --run "uv run make -C core build_prodtest"
+          nix-shell --run "uv run ./tools/check-insecure-prng.py --absent core/build-xtask/artifacts/latest/prodtest.bin"
+      - run: nix-shell --run "uv run make -C core build_bootloader_ci"
+        if: matrix.coins == 'universal' && matrix.type != 'debuglink' && matrix.model == 'T2T1'
+      - run: |
+          nix-shell --run "uv run make -C core build_firmware"
+          nix-shell --run "uv run ./tools/check-insecure-prng.py --absent core/build-xtask/artifacts/latest/firmware.bin"
+      - run: nix-shell --run "uv run ./tools/print-rust-stack-sizes.py | sort -k1 -n | tail -n 50"
+      # - run: nix-shell --run "uv run ./tools/print-rust-type-sizes.sh core/build/firmware/rust-type-sizes.log" | awk '$1 >= 1000' | sort -k1 -n
+      - run: nix-shell --run "uv run ./tools/check-bitcoin-only core/build-xtask/artifacts/latest/firmware.bin"
+        if: matrix.coins == 'btconly' && matrix.type != 'debuglink'
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-firmware-${{ matrix.model }}-${{ matrix.coins }}-${{ matrix.type }}${{ matrix.miniscript && '-miniscript' || '' }}${{ matrix.n1w1 && '-n1w1' || '' }}
+          path: |
+            core/build-xtask/artifacts/latest/*.bin
+            core/build-xtask/artifacts/latest/*.elf
+            core/build-xtask/artifacts/pub/*
+          retention-days: 7
+
+  core_emu:
+    name: Build emu (${{ matrix.model }}, ${{ matrix.coins }}, ${{ matrix.type }}, ${{ matrix.asan }}${{ matrix.miniscript && ', miniscript' || '' }}${{matrix.n1w1 && ', n1w1' || '' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: param
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+        coins: [universal, btconly]
+        # type: [normal, debuglink]
+        type: ${{ fromJSON(github.event_name == 'schedule' && '["normal", "debuglink"]' || '["debuglink"]') }}
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+        miniscript: [false]
+        n1w1: [false]
+        exclude:
+          - type: normal
+            asan: asan
+        include:
+          - model: T3T1
+            coins: btconly
+            type: debuglink
+            asan: noasan
+            miniscript: true  # currently Miniscript is not supported for universal builds
+          - model: T3W1
+            coins: universal
+            type: debuglink
+            asan: noasan
+            n1w1: true  # currently N1W1 is not supported for normal builds
+    env:
+      TREZOR_MODEL: ${{ matrix.model }}
+      BITCOIN_ONLY: ${{ matrix.coins == 'universal' && '0' || '1' }}
+      PYOPT: ${{ matrix.type == 'debuglink' && '0' || '1' }}
+      MINISCRIPT: ${{ matrix.miniscript && '1' || '0' }}
+      N1W1: ${{ matrix.n1w1 && '1' || '0' }}
+      ADDRESS_SANITIZER: ${{ matrix.asan == 'asan' && '1' || '0' }}
+      LSAN_OPTIONS: "suppressions=../../asan_suppressions.txt"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C core build_bootloader_emu"
+        if: matrix.coins == 'universal' && matrix.asan == 'noasan'
+      - run: nix-shell --run "uv run make -C core build_unix_frozen"
+      - run: nix-shell --run "uv run ./tools/check-insecure-prng.py --present --model $TREZOR_MODEL core/build-xtask/artifacts/latest/firmware-emu"
+      - run: nix-shell --run "uv run make -C core test_emu_sanity"
+      - run: cp core/build-xtask/artifacts/latest/firmware-emu core/build-xtask/artifacts/latest/firmware-emu-${{ matrix.model }}-${{ matrix.coins }}${{ matrix.miniscript && '-miniscript' || '' }}${{ matrix.n1w1 && '-n1w1' || '' }}
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-${{ matrix.coins }}-${{ matrix.type }}-${{ matrix.asan }}${{ matrix.miniscript && '-miniscript' || '' }}${{ matrix.n1w1 && '-n1w1' || '' }}
+          path: |
+            core/build-xtask/artifacts/latest/firmware-emu*
+            core/build-xtask/artifacts/latest/bootloader-emu
+            core/build-xtask/artifacts/latest/mpy-files/**/*.i
+          retention-days: 7
+
+  core_emu_arm:
+    if: github.event_name == 'schedule'
+    name: Build emu ARM (${{ matrix.model }}, ${{ matrix.coins }}, ${{ matrix.type }}, ${{ matrix.asan }}${{matrix.n1w1 && ', n1w1' || '' }})
+    runs-on: ubuntu-latest-arm64
+    timeout-minutes: 15
+    needs: param
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+        coins: [universal]
+        type: [debuglink]
+        asan: [noasan]
+        n1w1: [false]
+        include:
+          - model: T3W1
+            coins: universal
+            type: debuglink
+            asan: noasan
+            n1w1: true  # currently N1W1 is not supported for normal builds
+    env:
+      TREZOR_MODEL: ${{ matrix.model }}
+      BITCOIN_ONLY: ${{ matrix.coins == 'universal' && '0' || '1' }}
+      PYOPT: ${{ matrix.type == 'debuglink' && '0' || '1' }}
+      N1W1: ${{ matrix.n1w1 && '1' || '0' }}
+      ADDRESS_SANITIZER: ${{ matrix.asan == 'asan' && '1' || '0' }}
+      LSAN_OPTIONS: "suppressions=../../asan_suppressions.txt"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C core build_bootloader_emu"
+        if: matrix.coins == 'universal'
+      - run: nix-shell --run "uv run make -C core build_unix_frozen"
+      - run: mv core/build-xtask/artifacts/latest/firmware-emu core/build-xtask/artifacts/latest/firmware-emu-arm-${{ matrix.model }}-${{ matrix.coins }}${{ matrix.n1w1 && '-n1w1' || '' }}
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-emu-arm-${{ matrix.model }}-${{ matrix.coins }}-${{ matrix.type }}-${{ matrix.asan }}${{ matrix.n1w1 && '-n1w1' || '' }}
+          path: |
+            core/build-xtask/artifacts/latest/firmware-emu*
+            core/build-xtask/artifacts/latest/bootloader-emu
+          retention-days: 2
+
+  prodtest_emu:
+    name: Build and test prodtest emu (${{ matrix.model }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T3W1]
+    env:
+      SDL_VIDEODRIVER: dummy
+      TREZOR_MODEL: ${{ matrix.model }}
+      PYTEST_TIMEOUT: 400
+      TESTOPTS: "--durations 10"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: ./.github/actions/environment
+      - name: Build prodtest emulator
+        run: nix-shell --run "uv run xtask build prodtest --model ${{ matrix.model }} --emulator"
+      - name: Upload prodtest emulator artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: prodtest-emu-${{ matrix.model }}
+          path: |
+            core/build-xtask/artifacts/${{ matrix.model }}/prodtest-emu
+          retention-days: 7
+      - name: Run prodtest device tests
+        run: nix-shell --run "uv run make -C core test_emu_prodtest"
+
+  core_unit_python_test:
+    name: Python unit tests (${{ matrix.model }}, ${{ matrix.coins }}, ${{ matrix.asan }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: param
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+        coins: ${{ fromJSON(github.event_name == 'schedule' && '["universal", "btconly"]' || '["universal"]') }}
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+    env:
+      TREZOR_MODEL: ${{ matrix.model }}
+      BITCOIN_ONLY: ${{ matrix.coins == 'universal' && '0' || '1' }}
+      ADDRESS_SANITIZER: ${{ matrix.asan == 'asan' && '1' || '0' }}
+      LSAN_OPTIONS: "suppressions=../../asan_suppressions.txt"
+      PYOPT: 0
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C core build_unix"
+      - run: nix-shell --run "uv run make -C core test_emu_sanity"  # sanity check non-frozen emulator
+      - name: Start Tropic model
+        if: ${{ matrix.model == 'T3W1' }}
+        run: nix-shell --run "uv run model_server tcp -c tests/tropic_model/config.yml > tests/trezor-tropic-model.log 2>&1 &"
+      - run: nix-shell --run "uv run make -C core test"
+
+  core_unit_rust_test:
+    name: Rust unit tests (${{ matrix.model }}, ${{ matrix.asan }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - param
+      - core_emu
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+    env:
+      TREZOR_MODEL: ${{ matrix.model }}
+      ADDRESS_SANITIZER: ${{ matrix.asan == 'asan' && '1' || '0' }}
+      RUSTC_BOOTSTRAP: ${{ matrix.asan == 'asan' && '1' || '0' }}
+      RUSTFLAGS: ${{ matrix.asan == 'asan' && '-Z sanitizer=address' || '' }}
+      LSAN_OPTIONS: "suppressions=../../asan_suppressions.txt"
+      DISABLE_TROPIC: 1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C core test_rust"
+      - run: nix-shell --run "uv run make -C core clippy"
+
+  core_rust_client_test:
+    name: Rust trezor-client tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: core_emu
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-universal-debuglink-noasan
+          path: core/build-xtask/artifacts/latest
+      - run: chmod +x core/build-xtask/artifacts/latest/firmware-emu*
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run core/emu.py --headless -q --temporary-profile --slip0014 --command cargo test --manifest-path rust/trezor-client/Cargo.toml"
+
+  # Device tests for Core. Running device tests and also comparing screens
+  # with the expected UI result.
+  # See artifacts for a comprehensive report of UI.
+  # See [docs/tests/ui-tests](../tests/ui-tests.md) for more info.
+  core_device_test:
+    name: Device tests (${{ matrix.model }}, ${{ matrix.coins }}, ${{ matrix.asan }}, ${{ matrix.lang }}${{ matrix.miniscript && ', miniscript' || '' }}${{ matrix.n1w1 && ', n1w1' || '' }})
+    runs-on: ubuntu-latest
+    needs:
+      - param
+      - core_emu
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+        coins: [universal, btconly]
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+        lang: ${{ fromJSON(needs.param.outputs.test_lang) }}
+        miniscript: [false]
+        n1w1: [false]
+        include:
+          - model: T3T1
+            coins: btconly
+            asan: noasan
+            lang: en
+            miniscript: true
+          - model: T3W1
+            coins: universal
+            asan: noasan
+            lang: en
+            n1w1: true
+    env:
+      TREZOR_PROFILING: ${{ matrix.asan == 'noasan' && '1' || '0' }}
+      TREZOR_MODEL: ${{ matrix.model }}
+      ADDRESS_SANITIZER: ${{ matrix.asan == 'asan' && '1' || '0' }}
+      PYTEST_TIMEOUT: ${{ matrix.asan == 'asan' && 600 || 400 }}
+      ACTIONS_DO_UI_TEST: ${{ matrix.coins == 'universal' && matrix.asan == 'noasan' }}
+      STABLE_FEATURES: ${{ !(matrix.miniscript || matrix.n1w1) }}  # TODO: remove after stabilization
+      TEST_LANG: ${{ matrix.lang }}
+      TESTOPTS: "--durations 10 --session-timeout ${{ matrix.model == 'T3W1' && '3000' || '1800' }}"  # pytest global timeout
+    timeout-minutes: ${{ matrix.model == 'T3W1' && 60 || 40 }}  # CI job timeout
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-${{ matrix.coins }}-debuglink-${{ matrix.asan }}${{ matrix.miniscript && '-miniscript' || '' }}${{ matrix.n1w1 && '-n1w1' || '' }}
+          path: core/build-xtask/artifacts/latest
+      - run: chmod +x core/build-xtask/artifacts/latest/firmware-emu*
+      - uses: ./.github/actions/environment
+      - name: Run device tests
+        if: ${{ env.STABLE_FEATURES == 'true' }}
+        run: nix-shell --run "uv run make -C core ${{ env.ACTIONS_DO_UI_TEST == 'true' && 'test_emu_ui_multicore' || 'test_emu' }}"
+      - name: Run device tests (without UI fixtures)
+        if: ${{ env.STABLE_FEATURES != 'true' }}
+        run: nix-shell --run "uv run make -C core ${{ env.ACTIONS_DO_UI_TEST == 'true' && 'test_emu_multicore' || 'test_emu' }}"
+      - run: tail -v -n50 tests/trezor*.log || true
+        if: failure()
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-test-device-${{ matrix.model }}-${{ matrix.coins }}-${{ matrix.lang }}-${{ matrix.asan }}${{ matrix.miniscript && '-miniscript' || '' }}${{ matrix.n1w1 && '-n1w1' || '' }}
+          path: tests/trezor*.log
+          retention-days: 7
+        if: always()
+      - uses: ./.github/actions/ui-report
+        with:
+          model: ${{ matrix.model }}
+          lang: ${{ matrix.lang }}
+          status: ${{ job.status }}
+        if: ${{ always() && env.ACTIONS_DO_UI_TEST == 'true' && env.STABLE_FEATURES == 'true' }}
+        continue-on-error: true
+      - uses: ./.github/actions/upload-coverage
+        if: ${{ env.STABLE_FEATURES == 'true' }}
+
+  # Click tests - UI.
+  # See [docs/tests/click-tests](../tests/click-tests.md) for more info.
+  core_click_test:
+    name: Click tests (${{ matrix.model }}, ${{ matrix.asan }}, ${{ matrix.lang }})
+    runs-on: ubuntu-latest
+    needs:
+      - param
+      - core_emu
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+        lang: ${{ fromJSON(needs.param.outputs.test_lang) }}
+    env:
+      TREZOR_PROFILING: ${{ matrix.asan == 'noasan' && '1' || '0' }}
+      # MULTICORE: 4  # more could interfere with other jobs
+      PYTEST_TIMEOUT: 400
+      TEST_LANG: ${{ matrix.lang }}
+      TESTOPTS: "--durations 10"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-universal-debuglink-${{ matrix.asan }}
+          path: core/build-xtask/artifacts/latest
+      - run: chmod +x core/build-xtask/artifacts/latest/firmware-emu*
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C core test_emu_click_ui_multicore"
+        if: ${{ matrix.asan == 'noasan' }}
+      - run: nix-shell --run "uv run make -C core test_emu_click"
+        if: ${{ matrix.asan == 'asan' }}
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-test-click-${{ matrix.model }}-${{ matrix.lang }}-${{ matrix.asan }}
+          path: tests/trezor*.log
+          retention-days: 7
+        if: always()
+      - uses: ./.github/actions/ui-report
+        with:
+          model: ${{ matrix.model }}
+          lang: ${{ matrix.lang }}
+          status: ${{ job.status }}
+        if: always()
+        continue-on-error: true
+      - uses: ./.github/actions/upload-coverage
+
+  # Upgrade tests.
+  # See [docs/tests/upgrade-tests](../tests/upgrade-tests.md) for more info.
+  core_upgrade_test:
+    name: Upgrade tests (${{ matrix.model }}, ${{ matrix.asan }})
+    runs-on: ubuntu-latest
+    needs:
+      - param
+      - core_emu
+    strategy:
+      fail-fast: false
+      matrix:
+        # FIXME: T3B1 https://github.com/trezor/trezor-firmware/issues/2724
+        # FIXME: T3T1 https://github.com/trezor/trezor-firmware/issues/3595
+        model: [T2T1, T3W1]
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+    env:
+      PYTEST_TIMEOUT: 70
+      TESTOPTS: "--durations 10"
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - name: Set upgrade selector
+        run: |
+          echo "TREZOR_UPGRADE_TEST=${{ matrix.model }}" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-universal-debuglink-${{ matrix.asan }}
+          path: core/build-xtask/artifacts/latest
+      - run: chmod +x core/build-xtask/artifacts/latest/firmware-emu*
+      - uses: ./.github/actions/environment
+        with:
+          full-deps: "true"
+      - run: nix-shell --arg fullDeps true --run "tests/download_emulators.sh ${{ matrix.model }}"
+      - run: nix-shell --arg fullDeps true --run "uv run make -C core test_emu_upgrade"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-test-upgrade-${{ matrix.model }}-${{ matrix.asan }}
+          path: |
+            tests/trezor*.log
+          retention-days: 7
+        if: always()
+
+  # Persistence tests - UI.
+  core_persistence_test:
+    name: Persistence tests (${{ matrix.model }}, ${{ matrix.asan }})
+    runs-on: ubuntu-latest
+    needs:
+      - param
+      - core_emu
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+    env:
+      TREZOR_PROFILING: ${{ matrix.asan == 'noasan' && '1' || '0' }}
+      PYTEST_TIMEOUT: 400
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - name: Set upgrade selector
+        run: |
+          echo "TREZOR_UPGRADE_TEST=${{ matrix.model }}" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-universal-debuglink-${{ matrix.asan }}
+          path: core/build-xtask/artifacts/latest
+      - run: chmod +x core/build-xtask/artifacts/latest/firmware-emu*
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C core test_emu_persistence_ui"
+        if: ${{ matrix.asan == 'noasan' }}
+      - run: nix-shell --run "uv run make -C core test_emu_persistence"
+        if: ${{ matrix.asan == 'asan' }}
+      - uses: ./.github/actions/ui-report
+        with:
+          model: ${{ matrix.model }}
+          lang: en
+          status: ${{ job.status }}
+        if: always()
+        continue-on-error: true
+      - uses: ./.github/actions/upload-coverage
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-test-persistence-${{ matrix.model }}-${{ matrix.asan }}
+          path: |
+            tests/trezor*.log
+          retention-days: 7
+        if: always()
+
+  core_hwi_test:
+    name: HWI tests
+    if: false  # XXX currently failing
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: core_emu
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-universal-debuglink-noasan
+          path: core/build-xtask/artifacts/latest
+      - run: chmod +x core/build-xtask/artifacts/latest/firmware-emu*
+      - uses: ./.github/actions/environment
+        with:
+          full-deps: "true"
+      - run: nix-shell --run "git clone --depth=1 https://github.com/bitcoin-core/HWI.git"
+      - run: nix-shell --arg fullDeps true --run "cd HWI && poetry install && poetry run ./test/test_trezor.py --model_t ../core/build-xtask/artifacts/latest/firmware-emu bitcoind"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-test-hwi-${{ matrix.model }}
+          path: HWI/trezor-t-emulator.stdout
+          retention-days: 7
+
+  core_memory_profile:
+    name: Memory allocation report
+    if: false  # NOTE manual job, comment out to run
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TREZOR_MODEL: T2T1
+      TREZOR_MEMPERF: 1
+      PYOPT: 0
+      PYTEST_TIMEOUT: 900
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C core build_unix_frozen"
+      - run: nix-shell --run "uv run make -C core test_emu"
+      - run: nix-shell --run "mkdir core/prof/memperf-html"
+      - run: nix-shell --run "uv run core/tools/alloc.py --alloc-data=core/src/alloc_data.txt html core/prof/memperf-html"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-memperf-${{ matrix.model }}
+          path: |
+            tests/trezor*.log
+            core/prof/memperf-html
+          retention-days: 7
+        if: always()
+
+  # Flash size profiling
+
+  # Finds out how much flash space we have left in the firmware build
+  # Fails if the free space is less than certain threshold
+  core_flash_size_check:
+    name: Flash size check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: core_firmware
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1]  # FIXME: checker.py lacks awareness of U5 flash layout
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-firmware-${{ matrix.model }}-universal-normal  # FIXME: s/normal/debuglink/
+          path: core/build-xtask/artifacts
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run core/tools/size/checker.py core/build-xtask/artifacts/latest/firmware.elf"
+
+  # Monero tests.
+  core_monero_test:
+    name: Monero test (${{ matrix.model }}, ${{ matrix.asan }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - param
+      - core_emu
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1]
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+    env:
+      TREZOR_PROFILING: ${{ matrix.asan == 'noasan' && '1' || '0' }}
+      PYTEST_TIMEOUT: 400
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-universal-debuglink-${{ matrix.asan }}
+          path: core/build-xtask/artifacts/latest
+      - run: chmod +x core/build-xtask/artifacts/latest/firmware-emu*
+      - uses: ./.github/actions/environment
+        with:
+          full-deps: "true"
+      - run: nix-shell --arg fullDeps true --run "uv run make -C core test_emu_monero"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-test-monero-${{ matrix.model }}-${{ matrix.asan }}
+          path: |
+            tests/trezor*.log
+            core/tests/trezor_monero_tests.log
+          retention-days: 7
+        if: always()
+      - uses: ./.github/actions/upload-coverage
+
+
+  # Tests for U2F and HID.
+  core_u2f_test:
+    name: U2F test (${{ matrix.model }}, ${{ matrix.asan }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - param
+      - core_emu
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+    env:
+      TREZOR_PROFILING: ${{ matrix.asan == 'noasan' && '1' || '0' }}
+      PYTEST_TIMEOUT: 400
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-universal-debuglink-${{ matrix.asan }}
+          path: core/build-xtask/artifacts/latest
+      - run: chmod +x core/build-xtask/artifacts/latest/firmware-emu*
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C tests/fido_tests/u2f-tests-hid"
+      - run: nix-shell --run "uv run make -C core test_emu_u2f"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-test-u2f-${{ matrix.model }}-${{ matrix.asan }}
+          path: tests/trezor*.log
+          retention-days: 7
+        if: always()
+      - uses: ./.github/actions/upload-coverage
+
+  # FIDO2 device tests.
+  core_fido2_test:
+    name: FIDO2 test (${{ matrix.model }}, ${{ matrix.asan }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - param
+      - core_emu
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3T1, T3W1]  # XXX T3B1 https://github.com/trezor/trezor-firmware/issues/2724
+        asan: ${{ fromJSON(needs.param.outputs.asan) }}
+    env:
+      TREZOR_PROFILING: ${{ matrix.asan == 'noasan' && '1' || '0' }}
+      PYTEST_TIMEOUT: 400
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-universal-debuglink-${{ matrix.asan }}
+          path: core/build-xtask/artifacts/latest
+      - run: chmod +x core/build-xtask/artifacts/latest/firmware-emu*
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C core test_emu_fido2"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-test-fido2-${{ matrix.model }}-${{ matrix.asan }}
+          path: |
+            tests/trezor*.log
+          retention-days: 7
+        if: always()
+      - uses: ./.github/actions/upload-coverage
+
+  core_coverage_report:
+    name: Coverage report
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - core_emu
+      - core_click_test
+      - core_persistence_test
+      - core_device_test
+      - core_monero_test
+      - core_u2f_test
+      - core_fido2_test
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [T2T1, T3B1, T3T1, T3W1]
+    env:
+      COVERAGE_THRESHOLD: 85
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          pattern: core-coverage-${{ matrix.model }}-*
+          path: core
+          merge-multiple: true
+      # Reuse the frozen-build artifact produced by `core_emu` (noasan variant
+      # matches the test jobs that set TREZOR_PROFILING=1) so the preprocessed
+      # .i sources are available without rebuilding.
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          name: core-emu-${{ matrix.model }}-universal-debuglink-noasan
+          path: core/build-xtask/artifacts/latest
+      - uses: ./.github/actions/environment
+      # `make coverage` uses .i files downloaded above
+      - run: nix-shell --run "uv run make -C core coverage"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: core-coverage-report-${{ matrix.model }}
+          path: core/htmlcov
+          retention-days: 7
+          include-hidden-files: true
+        if: always()
+
+  binaries_size_report:
+    name: Binaries' size report
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - core_firmware
+    steps:
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          pattern: core-firmware-*
+          path: artifacts
+      - run: |
+          for build_type in normal debuglink
+          do
+            (echo '##' ${build_type}; \
+             echo '```'; \
+             find artifacts/core-firmware-*-${build_type}/ -name '*-*-*.bin' -printf "%10s %f\n" | sort -k 2; \
+             echo '```') >> $GITHUB_STEP_SUMMARY
+          done
+
+
+  core_ui_comment:
+    name: Post comment with UI diff URLs
+    # run UI comment job only for 'trezor/trezor-firmware' scheduled workflows and internal PRs (see #5381)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.repository == 'trezor/trezor-firmware'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+      - param
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+      - run: sleep 1m  # try avoiding github api rate limit
+      - run: |
+          python ci/make_pull_comment.py "${{ github.run_id }}" '${{ needs.param.outputs.test_lang }}' > ${{ env.PULL_COMMENT_PATH }}
+          cat ${{ env.PULL_COMMENT_PATH }} >> $GITHUB_STEP_SUMMARY
+      - uses: ./.github/actions/ui-comment
+        if: github.event_name == 'pull_request'
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7  # aws-actions/configure-aws-credentials@v6.0.0
+        with:
+          role-to-assume: arn:aws:iam::538326561891:role/gh_actions_deploy_dev_firmware_data
+          aws-region: eu-west-1
+
+      - run: python ci/make_summary_htmls.py "index" '${{ needs.param.outputs.test_lang }}' "tests/ui_tests/reporting/"
+      - run: python ci/make_summary_htmls.py "diff" '${{ needs.param.outputs.test_lang }}' "tests/ui_tests/reporting/"
+      - name: Upload per-language HTML summaries to S3
+        run: |
+          cd tests/ui_tests/reporting/
+          for F in *.html
+          do
+            aws s3 cp $F s3://data.trezor.io/dev/firmware/ui_report/${{ github.run_id }}/$F
+          done
+
+  core_upload_emu:
+    name: Upload emulator binaries
+    if: github.event_name == 'schedule' && github.repository == 'trezor/trezor-firmware'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+      - core_emu
+      - core_emu_arm
+    steps:
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          pattern: core-emu*debuglink-noasan*
+          merge-multiple: true
+          path: emulators
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7  # aws-actions/configure-aws-credentials@v6.0.0
+        with:
+          role-to-assume: arn:aws:iam::538326561891:role/gh_actions_deploy_dev_firmware_data
+          aws-region: eu-west-1
+        continue-on-error: true
+      - name: Upload nightly artifacts
+        run: |
+          rm -rf emulators/{bootloader,firmware}-emu emulators/mpy-files emulators/*.json
+          pushd emulators
+          # trezor-user-env expected format for aarch64: trezor-emu-arm-core-T2T1-universal
+          for F in firmware-emu-arm-*; do NEWF=`echo $F | sed s/firmware-emu-arm/trezor-emu-arm-core/`; mv $F $NEWF; done
+          # trezor-user-env expected format for x86_64: trezor-emu-core-T2T1-universal
+          for F in firmware-emu-*; do NEWF=`echo $F | sed s/firmware-emu/trezor-emu-core/`; mv $F $NEWF; done
+          popd
+          tree
+          aws s3 sync --only-show-errors emulators s3://data.trezor.io/dev/firmware/emu-nightly
+
+  core_upload_emu_branch:
+    name: Upload emulator binaries for the current branch
+    # Not building it for nightly CI
+    if: github.event_name != 'schedule' && github.repository == 'trezor/trezor-firmware'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+      # Do not include ARM, they are only built on nightly
+      - core_emu
+    steps:
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          pattern: core-emu*debuglink-noasan*
+          merge-multiple: true
+          path: emulators
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7  # aws-actions/configure-aws-credentials@v6.0.0
+        with:
+          role-to-assume: arn:aws:iam::538326561891:role/gh_actions_deploy_dev_firmware_data
+          aws-region: eu-west-1
+        continue-on-error: true
+      - name: Determine branch name
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            branch_name=${{ github.head_ref }}
+          else
+            branch_name=${{ github.ref_name }}
+          fi
+          echo "branch_name=$branch_name" >> $GITHUB_ENV
+      - name: Upload artifacts to branch directory
+        run: |
+          rm -rf emulators/{bootloader,firmware}-emu emulators/mpy-files emulators/*.json
+          pushd emulators
+          for F in firmware-emu-*; do NEWF=`echo $F | sed s/firmware-emu/trezor-emu-core/`; mv $F $NEWF; done
+          popd
+          tree
+          aws s3 sync --only-show-errors emulators s3://data.trezor.io/dev/firmware/emu-branches/$branch_name
+
+  rust_deps_check:
+    name: Rust dependencies check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/environment
+      - run: nix-shell --run "uv run make -C core audit_rust"
+      - run: nix-shell --run "uv run make -C core vet_rust"
+
+  unsigned_firmware_archive:
+    name: Unsigned firmware archive  # for release QA purposes
+    if: github.event_name == 'push'  # release branches only, only those currently trigger push
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: core_firmware
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: ./.github/actions/environment
+      - name: Generate translation blobs
+        run: nix-shell --run "uv run make -C core translations"
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          pattern: core-firmware-*-*-normal
+          path: downloaded-artifacts
+      - name: Run unpack-artifacts.py
+        run: |
+          mkdir -p to-upload/firmware/unsigned
+          python tools/unpack-artifacts.py \
+              --releases common/releases.json \
+              --translations core/translations \
+              --output to-upload/firmware/unsigned \
+              downloaded-artifacts
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # actions/upload-artifact@v7.0.0
+        with:
+          name: unsigned
+          path: to-upload/firmware*  # path hierarchy preserved after the first wildcard
+          retention-days: 7
+
+  upload_nightly_firmware:
+    name: Upload nightly firmware
+    if: github.event_name == 'schedule'  # scheduled nightly runs only
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: core_firmware
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # actions/checkout@v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: ./.github/actions/environment
+      - name: Generate translation blobs
+        run: nix-shell --run "uv run make -C core translations"
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3  # actions/download-artifact@v8.0.0
+        with:
+          pattern: core-firmware-*-*-normal
+          path: downloaded-artifacts
+      - name: Detect version
+        run: |
+          VERSION=`nix-shell --run "uv run xtask print-version firmware"`
+          echo VERSION="$VERSION" >> $GITHUB_ENV
+          # NOTE: this is commithash of the merge commit for pull_request events
+          echo COMMIT="${{ github.sha }}" >> $GITHUB_ENV
+          cat $GITHUB_ENV
+      - name: Run unpack-artifacts.py
+        run: |
+          mkdir -p firmware-nightly
+          python tools/unpack-artifacts.py \
+              --version "$VERSION" \
+              --translations core/translations \
+              --output firmware-nightly \
+              downloaded-artifacts
+      - name: Generate JSONs
+        run: |
+          nix-shell --run "uv run tools/gen-nightly-release-jsons.py --revision $COMMIT --root firmware-nightly $VERSION"
+          find firmware-nightly | sort
+          cat firmware-nightly/t*/universal/*.json || true
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7  # aws-actions/configure-aws-credentials@v6.0.0
+        with:
+          role-to-assume: arn:aws:iam::538326561891:role/gh_actions_deploy_dev_firmware_data
+          aws-region: eu-west-1
+        continue-on-error: true
+      - name: Upload to S3
+        run: |
+          aws s3 sync \
+              --no-progress \
+              --delete \
+              --cache-control max-age=600 \
+              firmware-nightly \
+              s3://data.trezor.io/dev/firmware/firmware-nightly
+
+
+  # Connect
+  # TODO: core_connect_test

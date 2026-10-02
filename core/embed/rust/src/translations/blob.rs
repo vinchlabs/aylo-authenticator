@@ -1,0 +1,725 @@
+use core::{mem, str};
+
+use crypto::merkle::merkle_root;
+use crypto::{cosi, ed25519, sha256};
+use heapless::Vec;
+
+use super::error::Error;
+use super::public_keys;
+use super::translated_string::TranslatedString;
+use crate::io::InputStream;
+
+pub const MAX_HEADER_LEN: u16 = 1024;
+pub const EMPTY_BYTE: u8 = 0xFF;
+const SENTINEL_ID: u16 = 0xFFFF;
+
+const SIGNATURE_THRESHOLD: u8 = 2;
+
+// Maximum padding at the end of an offsets table (typically for alignment
+// purposes). We allow at most 3 for alignment 4. In practice right now this
+// should be max 1.
+const MAX_TABLE_PADDING: usize = 3;
+
+#[repr(C, packed)]
+struct OffsetEntry {
+    pub id: u16,
+    pub offset: u16,
+}
+
+pub struct Table<'a> {
+    offsets: &'a [OffsetEntry],
+    data: &'a [u8],
+}
+
+fn validate_offset_table(
+    data_len: usize,
+    mut iter: impl Iterator<Item = u16>,
+) -> Result<(), Error> {
+    // every offset table must have at least the sentinel
+    let mut prev = iter.next().ok_or(Error::InvalidOffsetTable)?;
+    if prev != 0 {
+        // first offset must always be 0 (even as a sentinel, indicating no data)
+        return Err(Error::InvalidOffsetTable);
+    }
+    for next in iter {
+        // offsets must be in ascending order
+        if prev > next {
+            return Err(Error::InvalidOffsetTable);
+        }
+        prev = next;
+    }
+    // sentinel needs to be at least data_len - MAX_TABLE_PADDING, and at most
+    // data_len
+    let sentinel: usize = prev.into();
+    // saturating_sub: data_len can be smaller than MAX_TABLE_PADDING
+    if sentinel < data_len.saturating_sub(MAX_TABLE_PADDING) || sentinel > data_len {
+        return Err(Error::InvalidOffsetTable);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ui_font_kerning")]
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+struct KernIndexEntry {
+    left_cp: u16,
+    count: u16,
+}
+
+#[cfg(feature = "ui_font_kerning")]
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+struct KernPair {
+    right_cp: u16,
+    value: i8,
+    _pad: u8,
+}
+
+#[cfg(feature = "ui_font_kerning")]
+/// Two-level kerning table stored in the translations blob.
+/// Binary layout (after the outer BlobTable slice):
+///   [u16 data_bytes]               (outer KerningList length prefix)
+///   [u16 index_count]
+///   [KernIndexEntry] × index_count (4 bytes each, sorted by left_cp)
+///   [u16 pair_count]
+///   [KernPair]       × pair_count  (4 bytes each)
+///
+/// Start offset in pairs for entry i is the sum of counts for all preceding
+/// entries.
+pub struct KerningTable<'a> {
+    index: &'a [KernIndexEntry],
+    pairs: &'a [KernPair],
+}
+
+#[cfg(feature = "ui_font_kerning")]
+impl<'a> KerningTable<'a> {
+    pub fn new(mut reader: InputStream<'a>) -> Result<Self, Error> {
+        // First u16 is the outer byte-length prefix written by KerningList.SUBCON.
+        // Used to cross-validate the explicit index_count and pair_count fields.
+        let data_bytes: usize = reader.read_u16_le()?.into();
+        let index_count: usize = reader.read_u16_le()?.into();
+
+        let index_size = index_count * mem::size_of::<KernIndexEntry>();
+
+        let index_data = reader.read(index_size)?;
+        // SAFETY: KernIndexEntry is #[repr(C, packed)] with size 4, align 1.
+        let (_prefix, index, _suffix) = unsafe { index_data.align_to::<KernIndexEntry>() };
+        if !_prefix.is_empty() || !_suffix.is_empty() {
+            return Err(Error::InvalidAlignment);
+        }
+
+        let pair_count: usize = reader.read_u16_le()?.into();
+        let pairs_size = pair_count * mem::size_of::<KernPair>();
+
+        // Validate that data_bytes is consistent with the explicit counts.
+        let expected_data_bytes = 2 + index_size + 2 + pairs_size;
+        if data_bytes != expected_data_bytes {
+            return Err(Error::InvalidLength);
+        }
+
+        let pairs_data = reader.read(pairs_size)?;
+        // SAFETY: KernPair is #[repr(C, packed)] with size 4, align 1.
+        let (_prefix, pairs, _suffix) = unsafe { pairs_data.align_to::<KernPair>() };
+        if !_prefix.is_empty() || !_suffix.is_empty() {
+            return Err(Error::InvalidAlignment);
+        }
+
+        Ok(Self { index, pairs })
+    }
+
+    pub fn get(&self, left_cp: u16, right_cp: u16) -> Option<i8> {
+        let mut offset = 0usize;
+        for &entry in self.index {
+            if entry.left_cp == left_cp {
+                for &pair in &self.pairs[offset..offset + entry.count as usize] {
+                    if pair.right_cp == right_cp {
+                        return Some(pair.value);
+                    }
+                }
+                return None;
+            }
+            if entry.left_cp > left_cp {
+                break; // index is sorted
+            }
+            offset += entry.count as usize;
+        }
+        None
+    }
+}
+
+impl<'a> Table<'a> {
+    pub fn new(mut reader: InputStream<'a>) -> Result<Self, Error> {
+        let count = reader.read_u16_le()?;
+        // The offsets table is (count + 1) entries long, the last entry is a sentinel.
+        let offsets_len: usize = (count + 1).into();
+        let offsets_data = reader.read(offsets_len * mem::size_of::<OffsetEntry>())?;
+        // SAFETY: OffsetEntry is repr(packed) of two u16 values, so any four bytes are
+        // a valid OffsetEntry value.
+        let (_prefix, offsets, _suffix) = unsafe { offsets_data.align_to::<OffsetEntry>() };
+        if !_prefix.is_empty() || !_suffix.is_empty() {
+            return Err(Error::InvalidAlignment);
+        }
+
+        Ok(Self {
+            offsets,
+            data: reader.rest(),
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_offset_table(self.data.len(), self.offsets.iter().map(|it| it.offset))?;
+        if !matches!(
+            self.offsets.iter().last().map(|it| it.id),
+            Some(SENTINEL_ID)
+        ) {
+            return Err(Error::InvalidOffsetTable);
+        }
+        // check that the ids are sorted
+        let Some(first_entry) = self.offsets.first() else {
+            // empty table is sorted
+            return Ok(());
+        };
+        let mut prev_id = first_entry.id;
+        for entry in self.offsets.iter().skip(1) {
+            if entry.id <= prev_id {
+                return Err(Error::InvalidOffsetTable);
+            }
+            prev_id = entry.id;
+        }
+        Ok(())
+    }
+
+    pub fn get(&self, id: u16) -> Option<&'a [u8]> {
+        self.offsets
+            .binary_search_by_key(&id, |it| it.id)
+            .ok()
+            .and_then(|idx| {
+                let start = self.offsets[idx].offset.into();
+                // When `id` is the sentinel, `idx` is the last entry and there
+                // is no next offset to read - return None instead of panicking.
+                let end = self.offsets.get(idx + 1)?.offset.into();
+                self.data.get(start..end)
+            })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u16, &'a [u8])> + '_ {
+        let mut prev_offset = 0usize;
+        self.offsets.iter().skip(1).map(move |entry| {
+            let start = prev_offset;
+            let end = entry.offset.into();
+            prev_offset = end;
+            (entry.id, &self.data[start..end])
+        })
+    }
+}
+
+pub(super) struct TranslationStringsChunk<'a> {
+    strings: &'a str,
+    offsets: &'a [u16],
+}
+
+impl<'a> TranslationStringsChunk<'a> {
+    fn parse_from(mut reader: InputStream<'a>) -> Result<Self, Error> {
+        let count: usize = reader.read_u16_le()?.into();
+        let offsets_bytes = reader.read((count + 1) * mem::size_of::<u16>())?;
+        // SAFETY: any bytes are valid u16 values, so casting any data to
+        // a sequence of u16 values is safe.
+        let (_prefix, offsets, _suffix) = unsafe { offsets_bytes.align_to::<u16>() };
+        if !_prefix.is_empty() || !_suffix.is_empty() {
+            return Err(Error::InvalidAlignment);
+        }
+        let strings = str::from_utf8(reader.rest())?;
+        validate_offset_table(strings.len(), offsets.iter().copied())?;
+        Ok(Self { strings, offsets })
+    }
+
+    const fn len(&self) -> usize {
+        // The last entry is a sentinel
+        self.offsets.len() - 1
+    }
+
+    pub fn get(&self, index: usize) -> Option<&'a str> {
+        if index >= self.len() {
+            return None;
+        }
+        let start_offset = self.offsets[index].into();
+        let end_offset = self.offsets[index + 1].into();
+        // Construct the relevant slice
+        Some(&self.strings[start_offset..end_offset])
+    }
+}
+
+const MAX_TRANSLATION_CHUNKS: usize = 4;
+
+pub struct Translations<'a> {
+    header: TranslationsHeader<'a>,
+    chunks: Vec<TranslationStringsChunk<'a>, MAX_TRANSLATION_CHUNKS>,
+    fonts: Table<'a>,
+    #[cfg(feature = "ui_font_kerning")]
+    kernings: Table<'a>,
+}
+
+fn read_u16_prefixed_block<'a>(reader: &mut InputStream<'a>) -> Result<InputStream<'a>, Error> {
+    let len = reader.read_u16_le()?;
+    Ok(reader.read_stream(len.into())?)
+}
+
+impl<'a> Translations<'a> {
+    pub fn new(blob: &'a [u8]) -> Result<Self, Error> {
+        let mut blob_reader = InputStream::new(blob);
+
+        let (header, payload_reader) = TranslationsHeader::parse_from(&mut blob_reader)?;
+
+        // validate that the trailing bytes, if any, are empty
+        let remaining = blob_reader.rest();
+        if !remaining.iter().all(|&b| b == EMPTY_BYTE) {
+            // TODO optimize to quadwords?
+            return Err(Error::TrailingData);
+        }
+
+        let payload_bytes = payload_reader.rest();
+
+        let payload_digest = sha256::Sha256::digest(payload_bytes);
+        if payload_digest != header.data_hash {
+            return Err(Error::InvalidDataHash);
+        }
+
+        let mut payload_reader = InputStream::new(payload_bytes);
+
+        // construct translations data
+        let chunks = header.parse_translation_chunks(&mut payload_reader)?;
+        let fonts_reader = read_u16_prefixed_block(&mut payload_reader)?;
+
+        // construct and validate font table
+        let fonts = Table::new(fonts_reader)?;
+        fonts.validate()?;
+        for (_, font_data) in fonts.iter() {
+            let reader = InputStream::new(font_data);
+            let font_table = Table::new(reader)?;
+            font_table.validate()?;
+        }
+
+        let _kernings = match header.blob_magic {
+            BlobMagic::V2 if payload_reader.remaining() > 0 => {
+                let kerning_reader = read_u16_prefixed_block(&mut payload_reader)?;
+
+                // construct and validate kerning table
+                let kernings = Table::new(kerning_reader)?;
+                kernings.validate()?;
+
+                // Validate by parsing the kernings table
+                #[cfg(feature = "ui_font_kerning")]
+                for (_, kern_data) in kernings.iter() {
+                    let reader = InputStream::new(kern_data);
+                    KerningTable::new(reader)?;
+                }
+
+                kernings
+            }
+            BlobMagic::V0 | BlobMagic::V1 => {
+                if payload_reader.remaining() > 0 {
+                    return Err(Error::TrailingData);
+                }
+                Table {
+                    offsets: &[],
+                    data: &[],
+                }
+            }
+            _ => Table {
+                offsets: &[],
+                data: &[],
+            },
+        };
+
+        Ok(Self {
+            header,
+            chunks,
+            fonts,
+            #[cfg(feature = "ui_font_kerning")]
+            kernings: _kernings,
+        })
+    }
+
+    /// Returns the translation at the given index.
+    ///
+    /// SAFETY: Do not mess with the lifetimes in this signature.
+    ///
+    /// The lifetimes are a useful lie that bind the lifetime of the returned
+    /// string not to the underlying data, but to the _reference_ to the
+    /// translations object. This is to facilitate safe interface to
+    /// flash-based translations. See docs for `flash::get` for details.
+    #[allow(clippy::needless_lifetimes)]
+    pub fn translation<'b>(&'b self, mut index: usize) -> Option<&'b str> {
+        for chunk in &self.chunks {
+            match chunk.get(index) {
+                Some(string) => {
+                    if string.is_empty() {
+                        // The string is not defined in the blob.
+                        // May happen when old firmware is using newer translations and the string
+                        // was deleted in the newer version.
+                        // Fallback to english.
+                        return None;
+                    }
+                    return Some(string);
+                }
+                None => {
+                    index -= chunk.len();
+                    continue; // search next chunks
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the font table at the given index.
+    ///
+    /// SAFETY: Do not mess with the lifetimes in this signature.
+    ///
+    /// The lifetimes are a useful lie that bind the lifetime of the returned
+    /// string not to the underlying data, but to the _reference_ to the
+    /// translations object. This is to facilitate safe interface to
+    /// flash-based translations. See docs for `flash::get` for details.
+    #[allow(clippy::needless_lifetimes)]
+    fn font<'b>(&'b self, index: u16) -> Option<Table<'b>> {
+        self.fonts
+            .get(index)
+            .and_then(|data| Table::new(InputStream::new(data)).ok())
+    }
+
+    /// Returns the header of the translations blob.
+    ///
+    /// SAFETY: Do not mess with the lifetimes in this signature.
+    ///
+    /// The lifetimes are a useful lie that bind the lifetime of the returned
+    /// string not to the underlying data, but to the _reference_ to the
+    /// translations object. This is to facilitate safe interface to
+    /// flash-based translations. See docs for `flash::get` for details.
+    #[allow(clippy::needless_lifetimes)]
+    pub fn header<'b>(&'b self) -> &'b TranslationsHeader<'b> {
+        &self.header
+    }
+
+    /// Returns a byte slice of the glyph data for the given UTF-8 codepoint in
+    /// the specified font.
+    ///
+    /// SAFETY: Do not mess with the lifetimes in this signature.
+    ///
+    /// The lifetimes are a useful lie that bind the lifetime of the returned
+    /// string not to the underlying data, but to the _reference_ to the
+    /// translations object. This is to facilitate safe interface to
+    /// flash-based translations. See docs for `flash::get` for details.
+    #[allow(clippy::needless_lifetimes)]
+    pub fn get_utf8_glyph<'b>(&'b self, codepoint: u16, font_index: u16) -> Option<&'b [u8]> {
+        self.font(font_index).and_then(|t| t.get(codepoint))
+    }
+
+    /// Return the kerning value for the given pair of codepoints in the
+    /// specified font.
+    ///
+    /// SAFETY: Do not mess with the lifetimes in this signature.
+    ///
+    /// The lifetimes are a useful lie that bind the lifetime of the returned
+    /// string not to the underlying data, but to the _reference_ to the
+    /// translations object. This is to facilitate safe interface to
+    /// flash-based translations. See docs for `flash::get` for details.
+    #[cfg(feature = "ui_font_kerning")]
+    #[allow(clippy::needless_lifetimes)]
+    pub fn get_utf8_kernings<'b>(
+        &'b self,
+        left_codepoint: u16,
+        right_codepoint: u16,
+        font_index: u16,
+    ) -> Option<i8> {
+        self.kernings.get(font_index).and_then(|data: &'a [u8]| {
+            let reader = InputStream::new(data);
+            let kern_table = KerningTable::new(reader).ok()?;
+            kern_table.get(left_codepoint, right_codepoint)
+        })
+    }
+}
+
+pub struct TranslationsHeader<'a> {
+    /// Blob magic
+    blob_magic: BlobMagic,
+    /// Raw content of the header, for signature verification
+    pub header_bytes: &'a [u8],
+    /// BCP 47 language tag (cs-CZ, en-US, ...)
+    pub language: &'a str,
+    /// 4 bytes of version (major, minor, patch, build)
+    pub version: [u8; 4],
+    /// Length of the raw data, i.e. translations section + fonts section
+    pub data_len: usize,
+    /// Hash of the data blob (excluding the header)
+    pub data_hash: sha256::Digest,
+    /// Merkle proof items
+    pub merkle_proof: &'a [sha256::Digest],
+    /// CoSi signature
+    pub signature: cosi::Signature,
+    /// Expected total length of the blob
+    pub total_len: usize,
+}
+
+fn read_fixedsize_str<'a>(reader: &mut InputStream<'a>, len: usize) -> Result<&'a str, Error> {
+    let bytes = reader.read(len)?;
+    let find_zero = bytes.iter().position(|&b| b == 0).unwrap_or(len);
+    let bytes_trimmed = &bytes[..find_zero];
+    core::str::from_utf8(bytes_trimmed).map_err(|_| Error::InvalidString)
+}
+
+enum BlobMagic {
+    V0,
+    V1,
+    V2,
+}
+
+impl BlobMagic {
+    fn parse_length(&self, reader: &mut InputStream<'_>) -> Result<usize, Error> {
+        Ok(match self {
+            Self::V0 => reader.read_u16_le()?.into(),
+            /* u32 -> usize can fail only on 16-bit system: */
+            Self::V1 | Self::V2 => unwrap!(reader.read_u32_le()?.try_into()),
+        })
+    }
+}
+
+struct ContainerPrefix {
+    blob_magic: BlobMagic,
+    container_length: usize,
+    prefix_length: usize,
+}
+
+impl ContainerPrefix {
+    fn parse_from(reader: &mut InputStream<'_>) -> Result<Self, Error> {
+        let offset = reader.tell();
+        let data = reader.read(6)?;
+        let blob_magic = match data {
+            b"TRTR00" => BlobMagic::V0,
+            b"TRTR01" => BlobMagic::V1,
+            b"TRTR02" => BlobMagic::V2,
+            _ => return Err(Error::BadMagic),
+        };
+        let container_length = blob_magic.parse_length(reader)?;
+        let prefix_length = reader.tell() - offset;
+        Ok(Self {
+            blob_magic,
+            container_length,
+            prefix_length,
+        })
+    }
+}
+
+impl<'a> TranslationsHeader<'a> {
+    const HEADER_MAGIC: &'static [u8] = b"TR";
+    const LANGUAGE_TAG_LEN: usize = 8;
+
+    /// Parse a translations header out of a stream.
+    ///
+    /// The returned tuple consists of:
+    /// (a) the parsed header and
+    /// (b) reader of the payload section of the translations blob.
+    /// The caller can use the returned reader to parse the payload.
+    ///
+    /// The input stream is positioned at the end of the translations blob (or
+    /// at the end of stream, whichever comes sooner). The caller can use this
+    /// to verify that there is no unexpected trailing data in the input
+    /// stream. (Also, you cannot make a mistake and read the payload out of
+    /// the input stream).
+    pub fn parse_from(reader: &mut InputStream<'a>) -> Result<(Self, InputStream<'a>), Error> {
+        //
+        // 1. parse outer container
+        //
+
+        // read the blob magic and length of contained data
+        let prefix = ContainerPrefix::parse_from(reader)?;
+
+        // continue working on the contained data (i.e., read beyond the bounds of
+        // container_length will result in EOF).
+        let mut reader = reader.read_stream(prefix.container_length.min(reader.remaining()))?;
+
+        //
+        // 2. parse the header section
+        //
+        let header_bytes = read_u16_prefixed_block(&mut reader)?.rest();
+
+        let mut header_reader = InputStream::new(header_bytes);
+
+        let magic = header_reader.read(Self::HEADER_MAGIC.len())?;
+        if magic != Self::HEADER_MAGIC {
+            return Err(Error::BadMagic);
+        }
+
+        let language = read_fixedsize_str(&mut header_reader, Self::LANGUAGE_TAG_LEN)?;
+        if language.is_empty() {
+            return Err(Error::InvalidString);
+        }
+
+        let model = read_fixedsize_str(&mut header_reader, 4)?;
+        if model != crate::trezorhal::model::INTERNAL_NAME {
+            return Err(Error::InvalidString);
+        }
+
+        let version_bytes = header_reader.read(4)?;
+        let version = unwrap!(version_bytes.try_into());
+
+        let data_len: usize = prefix.blob_magic.parse_length(&mut header_reader)?;
+        let data_hash: sha256::Digest =
+            unwrap!(header_reader.read(sha256::DIGEST_SIZE)?.try_into());
+
+        // ignore the rest of the header reader - this allows older firmware to
+        // understand newer header if there are only added items
+        _ = header_reader.rest();
+
+        //
+        // 3. parse the proof section
+        //
+        let mut proof_reader = read_u16_prefixed_block(&mut reader)?;
+        let proof_count: usize = proof_reader.read_byte()?.into();
+        let proof_length = proof_count * sha256::DIGEST_SIZE;
+        let proof_bytes = proof_reader.read(proof_length)?;
+
+        // create a list of the proof items
+        // SAFETY: sha256::Digest is a plain array of u8, so any bytes are valid
+        let (_prefix, merkle_proof, _suffix) = unsafe { proof_bytes.align_to::<sha256::Digest>() };
+        if !_prefix.is_empty() || !_suffix.is_empty() {
+            return Err(Error::InvalidAlignment);
+        }
+        let signature = cosi::Signature::new(
+            proof_reader.read_byte()?,
+            unwrap!(proof_reader.read(ed25519::SIGNATURE_SIZE)?.try_into()),
+        );
+
+        // check that there is no trailing data in the proof section
+        if proof_reader.remaining() > 0 {
+            return Err(Error::TrailingData);
+        }
+
+        // check that the declared data section length matches the container size
+        if prefix.container_length - reader.tell() != data_len {
+            return Err(Error::InvalidLength);
+        }
+
+        let new = Self {
+            header_bytes,
+            language,
+            version,
+            data_len,
+            data_hash,
+            merkle_proof,
+            signature,
+            total_len: prefix.container_length + prefix.prefix_length,
+            blob_magic: prefix.blob_magic,
+        };
+        new.verify()?;
+        Ok((new, reader))
+    }
+
+    fn parse_translation_chunks(
+        &self,
+        reader: &mut InputStream<'a>,
+    ) -> Result<Vec<TranslationStringsChunk<'a>, MAX_TRANSLATION_CHUNKS>, Error> {
+        let chunks_count = match self.blob_magic {
+            BlobMagic::V0 => 1,
+            BlobMagic::V1 | BlobMagic::V2 => reader.read_u16_le()?.into(),
+        };
+        if chunks_count > MAX_TRANSLATION_CHUNKS {
+            return Err(Error::InvalidLength);
+        }
+        let mut chunks = Vec::new();
+        for _ in 0..chunks_count {
+            let chunk_reader = read_u16_prefixed_block(reader)?;
+            let chunk = TranslationStringsChunk::parse_from(chunk_reader)?;
+            chunks.push(chunk).map_err(|_| Error::InvalidString)?;
+        }
+        Ok(chunks)
+    }
+
+    fn verify_with_keys(&self, public_keys: &[ed25519::PublicKey]) -> Result<(), Error> {
+        let merkle_root = merkle_root(self.header_bytes, self.merkle_proof);
+        cosi::verify(
+            SIGNATURE_THRESHOLD,
+            &merkle_root,
+            public_keys,
+            &self.signature,
+        )
+        .map_err(|_| Error::InvalidSignature)
+    }
+
+    pub fn verify(&self) -> Result<(), Error> {
+        #[allow(unused_mut)]
+        let mut result = self.verify_with_keys(&public_keys::PUBLIC_KEYS);
+
+        #[cfg(feature = "dev_keys")]
+        if result.is_err() {
+            // allow development keys
+            result = self.verify_with_keys(&public_keys::PUBLIC_KEYS_DEVEL);
+        }
+
+        result
+    }
+}
+
+// The constants below are generated by `translated_string.rs.mako` template.
+pub const ENGLISH_CHUNK: TranslationStringsChunk<'static> = TranslationStringsChunk {
+    strings: TranslatedString::ENGLISH_STRINGS,
+    offsets: TranslatedString::ENGLISH_OFFSETS,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_english() {
+        // Make sure English chunk was generated correctly.
+        validate_offset_table(
+            ENGLISH_CHUNK.strings.len(),
+            ENGLISH_CHUNK.offsets.iter().copied(),
+        )
+        .expect("offsets are valid");
+        assert!(ENGLISH_CHUNK.strings.is_ascii());
+        for i in 0..ENGLISH_CHUNK.len() {
+            ENGLISH_CHUNK.get(i).expect("valid index");
+        }
+        assert_eq!(ENGLISH_CHUNK.get(ENGLISH_CHUNK.len()), None);
+    }
+
+    #[test]
+    fn test_table_get() {
+        // Table layout: u16 count, (count + 1) packed (u16 id, u16 offset)
+        // entries (the last one being the sentinel), then the data.
+        let bytes: &[u8] = &[
+            2, 0, // entry count
+            1, 0, 0, 0, // id 1, offset 0
+            2, 0, 3, 0, // id 2, offset 3
+            0xFF, 0xFF, 6, 0, // sentinel id, offset 6
+            b'a', b'b', b'c', b'd', b'e', b'f',
+        ];
+        let table = Table::new(InputStream::new(bytes)).expect("valid table");
+        table.validate().expect("valid table");
+        assert_eq!(table.get(1), Some(&b"abc"[..]));
+        assert_eq!(table.get(2), Some(&b"def"[..]));
+        assert_eq!(table.get(3), None);
+        // Asking for the sentinel id must not panic and must return None.
+        assert_eq!(table.get(SENTINEL_ID), None);
+    }
+
+    #[test]
+    fn test_validate_offset_table_small_data() {
+        // data_len smaller than MAX_TABLE_PADDING must not underflow
+        // (overflow-checked builds would panic).
+        assert!(validate_offset_table(0, core::iter::once(0)).is_ok());
+        assert!(validate_offset_table(1, core::iter::once(0)).is_ok());
+        assert!(validate_offset_table(2, core::iter::once(0)).is_ok());
+        assert!(validate_offset_table(3, core::iter::once(0)).is_ok());
+        assert!(validate_offset_table(4, core::iter::once(0)).is_err());
+        assert!(validate_offset_table(5, core::iter::once(0)).is_err());
+        // sentinel pointing beyond the data is still rejected
+        assert!(validate_offset_table(0, [0, 1].into_iter()).is_err());
+        assert!(validate_offset_table(1, [0, 1].into_iter()).is_ok());
+        assert!(validate_offset_table(2, [0, 1].into_iter()).is_ok());
+        assert!(validate_offset_table(3, [0, 1].into_iter()).is_ok());
+        assert!(validate_offset_table(4, [0, 1].into_iter()).is_ok());
+        assert!(validate_offset_table(5, [0, 1].into_iter()).is_err());
+        assert!(validate_offset_table(6, [0, 1].into_iter()).is_err());
+    }
+}
